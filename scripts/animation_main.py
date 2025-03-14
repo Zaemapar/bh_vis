@@ -522,9 +522,6 @@ def extract_max_strain_and_zoomout_time(dir):
 
     return max_strain, min_zoomout_time
 
-def mc():
-    print("Murderer check")
-
 def main() -> None:
     """
     Main function that reads the strain data,
