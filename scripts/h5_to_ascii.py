@@ -81,118 +81,129 @@ def extract_black_hole_positions(pos_file, output_dir):
     """
     Extract the center-of-mass positions of black holes from an HDF5 file
     and save them to a text file named 'black_hole_positions.txt'.
-    Format: 8 columns, with time in column 1, AhA's x in column 6, and y in column 8 (others zero).
+    Format: 27 columns with time in column 0 and various parameters for two black holes.
     """
-    # Open the HDF5 file containing black hole positions
     with h5py.File(pos_file, "r") as f:
-        # Extract AhA's positions (shape: [n_timesteps, 4])
-        AhA_positions = f["AhA.dir/CoordCenterInertial.dat"][:]
-        AhA_arealmass = f["AhA.dir/ArealMass.dat"][:]
-        AhA_christodouloumass = f["AhA.dir/ChristodoulouMass.dat"][:]
-        AhA_dimensionfulinertialspin = f["AhA.dir/DimensionfulInertialSpin.dat"][:]
-        AhA_dimensionfulinertialspinmag = f["AhA.dir/DimensionfulInertialSpin.dat"][:]
-        AhA_chiinertial = f["AhA.dir/chiInertial.dat"][:]
-        AhA_chimaginertial = f["AhA.dir/chiMagInertial.dat"][:]
-        AhC_positions = f["AhC.dir/CoordCenterInertial.dat"][:]
-        AhC_arealmass = f["AhC.dir/ArealMass.dat"][:]
-        AhC_christodouloumass = f["AhC.dir/ChristodoulouMass.dat"][:]
-        AhC_dimensionfulinertialspin = f["AhC.dir/DimensionfulInertialSpin.dat"][:]
-        AhC_dimensionfulinertialspinmag = f["AhC.dir/DimensionfulInertialSpin.dat"][:]
-        AhC_chiinertial = f["AhC.dir/chiInertial.dat"][:]
-        AhC_chimaginertial = f["AhC.dir/chiMagInertial.dat"][:]
+        # Read datasets for each black hole group
+        datasets = {}
+        prefixes = ['AhA.dir', 'AhB.dir', 'AhC.dir']
+        for prefix in prefixes:
+            group = {}
+            group['positions'] = f[f"{prefix}/CoordCenterInertial.dat"][:]
+            group['arealmass'] = f[f"{prefix}/ArealMass.dat"][:]
+            group['christodouloumass'] = f[f"{prefix}/ChristodoulouMass.dat"][:]
+            dis_data = f[f"{prefix}/DimensionfulInertialSpin.dat"][:]
+            group['dimensionfulinertialspin'] = dis_data
+            group['dimensionfulinertialspinmag'] = dis_data
+            group['chiinertial'] = f[f"{prefix}/chiInertial.dat"][:]
+            group['chimaginertial'] = f[f"{prefix}/chiMagInertial.dat"][:]
+            datasets[prefix] = group
 
-        # Create an array of zeros with 8 columns
-        n_rows = AhA_positions.shape[0] + AhC_positions.shape[0]
-        print(n_rows)
-        output_dat = np.zeros((n_rows, 22))
-        
-        # Extract time (column 0), x (column 1), and y (column 2) from AhA's data
-        time = AhA_positions[:, 0]  # Assumes columns: [time, x, y, z]
-        time = np.concatenate((time, AhC_positions[:, 0]))
-        print(time)
-        x = -1*AhA_positions[:, 1]
-        x = np.concatenate((x, -1*AhC_positions[:, 1]))
-        y = AhA_positions[:, 2]
-        y = np.concatenate((y, AhC_positions[:, 2]))
-        z = AhA_positions[:, 3]
-        z = np.concatenate((z, AhC_positions[:, 3]))
-        am = AhA_arealmass[:, 1]
-        am = np.concatenate((am, AhC_arealmass[:, 1]))
-        cm = AhA_christodouloumass[:, 1]
-        cm = np.concatenate((cm, AhC_christodouloumass[:, 1]))
-        disx = AhA_dimensionfulinertialspin[:, 1]
-        disx = np.concatenate((disx, AhC_dimensionfulinertialspin[:, 1]))
-        disy = AhA_dimensionfulinertialspin[:, 2]
-        disy = np.concatenate((disy, AhC_dimensionfulinertialspin[:, 2]))
-        disz = AhA_dimensionfulinertialspin[:, 3]
-        disz = np.concatenate((disz, AhC_dimensionfulinertialspin[:, 3]))
-        dism = AhA_dimensionfulinertialspinmag[:, 1]
-        dism = np.concatenate((dism, AhC_dimensionfulinertialspinmag[:, 1]))
-        xix = AhA_chiinertial[:, 1]
-        xix = np.concatenate((xix, AhC_chiinertial[:, 1]))
-        xiy = AhA_chiinertial[:, 2]
-        xiy = np.concatenate((xiy, AhC_chiinertial[:, 2]))
-        xiz = AhA_chiinertial[:, 3]
-        xiz = np.concatenate((xiz, AhC_chiinertial[:, 3]))
-        xim = AhA_chimaginertial[:, 1]
-        xim = np.concatenate((xim, AhC_chimaginertial[:, 1]))
- 
-        # Assign time to column 1 (index 0), x to column 6 (index 5), and y to column 8 (index 7)
-        
+        # Extract and concatenate time
+        ahA_time = datasets['AhA.dir']['positions'][:, 0]
+        merged_time = datasets['AhC.dir']['positions'][:, 0]
+        time = np.concatenate((ahA_time, merged_time))
+        n_rows = len(ahA_time) + len(merged_time)
+        output_dat = np.zeros((n_rows, 27))
         output_dat[:, 0] = time
-        output_dat[:, 1] = am
-        output_dat[:, 2] = cm
-        output_dat[:, 3] = x
-        output_dat[:, 4] = y
-        output_dat[:, 5] = z
-        output_dat[:, 6] = disx
-        output_dat[:, 7] = disy
-        output_dat[:, 8] = disz
-        output_dat[:, 9] = dism
-        output_dat[:, 10] = xix
-        output_dat[:, 11] = xiy
-        output_dat[:, 12] = xiz
-        output_dat[:, 13] = xim
 
-        header = np.array([["# column 0: time = [time]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 1: am = [areal_mass]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 2: cm = [christodoulou_mass]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 3: x = [positions_x] * -1", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 4: y = [positions_y]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 5: z = [positions_z]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 6: disx = [dimensionful_inertial_spin_x]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 7: disy = [dimensionful_inertial_spin_y]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 8: disz = [dimensionful_inertial_spin_z]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 9: dism = [dimensionful_inertial_spin_mag]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 10: xix = [chi_inertial_x]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 11: xiy = [chi_inertial_y]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 12: xiz = [chi_inertial_z]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
-                  ["# column 13: xim = [chi_mag_inertial]", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]])
-        
-        output_data = np.vstack((header, output_dat))
+        # Define column mappings for bh1 (AhA + AhC) and bh2 (AhB + AhC)
+        columns_bh1 = [
+            (1, 'arealmass', 1),
+            (2, 'christodouloumass', 1),
+            (3, 'positions', 1),
+            (4, 'positions', 2),
+            (5, 'positions', 3),
+            (6, 'dimensionfulinertialspin', 1),
+            (7, 'dimensionfulinertialspin', 2),
+            (8, 'dimensionfulinertialspin', 3),
+            (9, 'dimensionfulinertialspinmag', 1),
+            (10, 'chiinertial', 1),
+            (11, 'chiinertial', 2),
+            (12, 'chiinertial', 3),
+            (13, 'chimaginertial', 1),
+        ]
+        columns_bh2 = [
+            (14, 'arealmass', 1),
+            (15, 'christodouloumass', 1),
+            (16, 'positions', 1),
+            (17, 'positions', 2),
+            (18, 'positions', 3),
+            (19, 'dimensionfulinertialspin', 1),
+            (20, 'dimensionfulinertialspin', 2),
+            (21, 'dimensionfulinertialspin', 3),
+            (22, 'dimensionfulinertialspinmag', 1),
+            (23, 'chiinertial', 1),
+            (24, 'chiinertial', 2),
+            (25, 'chiinertial', 3),
+            (26, 'chimaginertial', 1),
+        ]
 
-        # Define the output file path
+        # Populate bh1 columns (AhA and AhC)
+        for col, param, idx in columns_bh1:
+            data = np.concatenate([
+                datasets['AhA.dir'][param][:, idx],
+                datasets['AhC.dir'][param][:, idx]
+            ])
+            output_dat[:, col] = data
+
+        # Populate bh2 columns (AhB and AhC)
+        for col, param, idx in columns_bh2:
+            data = np.concatenate([
+                datasets['AhB.dir'][param][:, idx],
+                datasets['AhC.dir'][param][:, idx]
+            ])
+            output_dat[:, col] = data
+
+        # Generate header
+        header_lines = [
+            "# column 0: time = [time]",
+            "# column 1 (bh_1), 14 (bh_2): am = [areal_mass]",
+            "# column 2 (bh_1), 15 (bh_2): cm = [christodoulou_mass]",
+            "# column 3 (bh_1), 16 (bh_2): x = [positions_x]",
+            "# column 4 (bh_1), 17 (bh_2): y = [positions_y]",
+            "# column 5 (bh_1), 18 (bh_2): z = [positions_z]",
+            "# column 6 (bh_1), 19 (bh_2): disx = [dimensionful_inertial_spin_x]",
+            "# column 7 (bh_1), 20 (bh_2): disy = [dimensionful_inertial_spin_y]",
+            "# column 8 (bh_1), 21 (bh_2): disz = [dimensionful_inertial_spin_z]",
+            "# column 9 (bh_1), 22 (bh_2): dism = [dimensionful_inertial_spin_mag]",
+            "# column 10 (bh_1), 23 (bh_2): xix = [chi_inertial_x]",
+            "# column 11 (bh_1), 24 (bh_2): xiy = [chi_inertial_y]",
+            "# column 12 (bh_1), 25 (bh_2): xiz = [chi_inertial_z]",
+            "# column 13 (bh_1), 26 (bh_2): xim = [chi_mag_inertial]",
+            f"# Merger time:",
+        ]
+        header_rows = []
+        for line in header_lines:
+            header_row = [line] + [''] * (output_dat.shape[1] - 1)
+            header_rows.append(header_row)
+        header = np.array(header_rows)
+
+        merge_row = [merged_time[0]]
+        for row in range(output_dat.shape[1] - 1):
+            merge_row.append(0)
+
+        output_data = np.vstack((header, merge_row, output_dat))
+
+        # Save the output
         output_file = os.path.join(output_dir, "puncture_posns_vels_regridxyzU.txt")
-        
-        # Save data using np.savetxt
         np.savetxt(output_file, output_data, fmt="%s", delimiter=" ")
-        
         print(f"Saved black hole positions to {output_file}")
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        print("Usage: python3 convert_h5_to_ascii.py <input_h5_file> <output_dir> <R_ext> <pos_h5_file>")
+        print("Usage: python3 convert_h5_to_ascii.py <psi4_h5_file> <horizons_h5_file> <R_ext> <output_dir>")
         sys.exit(1)
 
-    h5_file = sys.argv[1]
-    output_dir = sys.argv[2]
+    psi4_file = sys.argv[1] # psi 4 data file
+    horizon_file = sys.argv[2] # bh horizon data file
     R_ext = float(sys.argv[3])  # Extraction radius
-    pos_file = sys.argv[4]  # Black hole position data file
+    output_dir = sys.argv[4]
 
     # Convert the HDF5 file to ASCII
-    convert_h5_to_ascii(h5_file, output_dir, R_ext)
+    convert_h5_to_ascii(psi4_file, output_dir, R_ext)
 
     # Extract black hole positions and save to ASCII
-    extract_black_hole_positions(pos_file, output_dir)
+    extract_black_hole_positions(horizon_file, output_dir)
 
     print("Conversion and extraction complete.")

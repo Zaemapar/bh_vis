@@ -27,6 +27,7 @@ from mayavi.sources.parametric_surface import ParametricSurface
 from mayavi.modules.surface import Surface
 from mayavi.modules.scalar_cut_plane import ScalarCutPlane
 import psi4_FFI_to_strain as psi4strain
+import matplotlib.pyplot as plt
 
 # Default parameters used when USE_SYS_ARGS is False
 BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
@@ -116,7 +117,7 @@ def interpolate_coords_by_time(
 
     return new_e1, new_e2, new_e3
 
-def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
+def initialize_tvtk_grid(num_azi: int, num_radius: int, status_messages=True) -> Tuple:
     """
     Sets initial parameters for the mesh generation module and returns
     a circular, polar mesh with manipulation objects to write and save data.
@@ -127,7 +128,7 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
               - tvtk.FloatArray: Array to store strain data.
               - tvtk.UnstructuredGrid: The unstructured grid representing the mesh.
               - tvtk.Points: Points object for the mesh.
-    >>> strain_array, grid, points = initialize_tvtk_grid(3, 4)
+    >>> strain_array, grid, points = initialize_tvtk_grid(3, 4, status_messages=False)
     >>> isinstance(strain_array, tvtk.FloatArray)
     True
     >>> isinstance(grid, tvtk.UnstructuredGrid)
@@ -162,54 +163,20 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
                 quad.point_ids.set_id(idx, pid)
             cell_array.insert_next_cell(quad)
 
+        # Update status
+        if status_messages:
+            progress = (j + 1) / (num_radius - 1) * 100
+            print(f"\rProgress: {int(progress)}% completed", end="", flush=True)
+
+    # Create a new line after status messages
+    if status_messages:
+        print()
+
     # Set grid properties
     grid.set_cells(quad.cell_type, cell_array)
 
     return strain_array, grid, points
 
-def create_gw(
-    engine: Engine,
-    grid: Any,
-    color: Tuple[float, float, float],
-    display_radius: int,
-    wireframe: bool = False,
-) -> None:
-    """
-    Creates and displays a gravitational wave strain from a given grid.
-    :param engine: Mayavi engine
-    :param grid: tvtk.UnstructuredGrid
-    :param color: color of the strain in a tuple ranging from (0, 0, 0) to (1, 1, 1)
-    :param wireframe: whether to display the strain as a wireframe or a surface
-    """
-    scene = engine.scenes[0]
-    gw = VTKDataSource(data=grid)
-    engine.add_source(gw, scene)
-    s = Surface()
-    engine.add_filter(s, gw)
-    s.actor.mapper.scalar_visibility = False
-    s.actor.property.color = color
-
-    def gen_contour(coord: NDArray, normal: NDArray):
-        contour = ScalarCutPlane()
-        engine.add_filter(contour, gw)
-        contour.implicit_plane.widget.enabled = False
-        contour.implicit_plane.plane.origin = coord
-        contour.implicit_plane.plane.normal = normal
-        contour.actor.property.line_width = 5
-        contour.actor.property.opacity = 0.5
-
-    if wireframe:
-        wire_intervals = np.linspace(-display_radius, display_radius, 14)
-
-        for c in wire_intervals:
-            gen_contour(np.array([c, 0, 0]), np.array([1, 0, 0]))
-            gen_contour(np.array([0, c, 0]), np.array([0, 1, 0]))
-        '''
-        s.actor.property.representation = "wireframe"
-        s.actor.property.color = (0, 0, 0)
-        s.actor.property.line_width = 0.005
-        s.actor.property.opacity = 0.5
-        '''
 def create_gw(
     engine: Engine,
     grid: Any,
@@ -317,35 +284,44 @@ def dhms_time(seconds: float) -> str:
             parts.append(f"{value} {label}")
     return " ".join(parts)
 
-def convert_to_movie(input_path: str, movie_name: str, fps: int = 24) -> None:
-    """
-    Converts a series of .png files into a movie using OpenCV.
-    :param input_path: Path to the directory containing the .png files
-    :param movie_name: Name of the movie file
-    :param fps: Frames per second (24 by default)
-    """
-    # Get sorted list of PNG files and their full paths
-    frames = sorted(f for f in os.listdir(input_path) if f.endswith(".png"))
-    full_paths = (os.path.join(input_path, f) for f in frames)  # Generator for paths
+def convert_to_movie(input_dir, output_file, fps=24):
+    # Get all image files from the input directory
+    image_files = sorted([os.path.join(input_dir, f) for f in os.listdir(input_dir)
+                          if f.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
 
-    # Read first frame to get dimensions
-    first_frame = cv2.imread(next(full_paths))
-    height, width, _ = first_frame.shape
+    if not image_files:
+        print("No images found in the directory.")
+        return
 
-    # Initialize video writer with first frame
-    video = cv2.VideoWriter(
-        os.path.join(input_path, f"{movie_name}.mp4"),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    video.write(first_frame)
+    # Read the first image to get the dimensions
+    first_image = cv2.imread(image_files[0])
+    if first_image is None:
+        print(f"Failed to read the first image: {image_files[0]}")
+        return
 
-    # Write remaining frames
-    for path in full_paths:
-        video.write(cv2.imread(path))
+    height, width, _ = first_image.shape
 
-    video.release()
+    # Create full output path by joining input_dir with output_file
+    output_path = os.path.join(input_dir, output_file)
+
+    # Create a video writer object
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for .mp4
+    video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    if not video_writer.isOpened():
+        print("Failed to create video writer.")
+        return
+
+    # Write images to video
+    for image_file in image_files:
+        img = cv2.imread(image_file)
+        if img is not None:
+            video_writer.write(img)
+        else:
+            print(f"Failed to read image: {image_file}")
+
+    # Release resources
+    video_writer.release()
 
 def ask_user(message: str):
     """
@@ -360,15 +336,8 @@ def ask_user(message: str):
     else:
         return True
 
-def max_bh_dist(file_path, x_col, y_col):
-    # Load only the required columns and compute squares simultaneously
-    x, y = np.loadtxt(file_path, usecols=(x_col, y_col), unpack=True)
-
-    # Find maximum of squared values first (avoids sqrt on all elements)
-    max_squared = np.max(x*x + y*y)
-
-    # Single sqrt operation at the end
-    return np.sqrt(max_squared)
+def symlog(x):
+    return np.sign(x) * np.log1p(np.abs(x))  # log1p(x) = log(1 + x), avoids log(0) issues
 
 def max_strain_values(data):
     """Identifies peak strain values where increasing/decreasing trends change."""
@@ -387,11 +356,8 @@ def max_strain_values(data):
                 peaks.append((t-1, times[t-1], abs(prev_val)))
                 increasing = False
         else:
-            if current_val >= prev_val:  # Valley detected
-                peaks.append((t-1, times[t-1], abs(prev_val)))
+            if current_val > prev_val:  # Valley detected
                 increasing = True
-            elif current_val < prev_val:
-                increasing = False
 
         prev_val = current_val
 
@@ -414,7 +380,7 @@ def get_local_maxima(data):
     y_col = data[:, 1]
     values = data[:, 2]
 
-    local_max = []  # Use list for O(1) appends
+    local_max = []  # Use list fdef plot_data(data, data2, m):
     decreasing = False
     prev_value = values[0]
 
@@ -442,9 +408,31 @@ def get_local_maxima(data):
 
 def local_max_iterative(data):
     max_data = get_local_maxima(data)
-    if max_data.shape[0] > 4:
+    max_max_data = get_local_maxima(max_data)
+    if 2 * max_max_data.shape[0] > max_data.shape[0]:
         max_data = local_max_iterative(max_data)
     return max_data
+
+def get_max_max(data):
+    max_max = get_local_maxima(data)
+    if max_max.shape[0] > 4:
+        max_max = get_max_max(max_max)
+    return max_max
+
+def get_strain_after_burst(values, end_of_burst_value):
+    prev_value = end_of_burst_value
+    end_of_burst_index = np.where(values[:, 2] == end_of_burst_value)[0][0]
+
+    if values.shape[0] < 3:
+        return 0
+
+    for t in range(end_of_burst_index + 1, len(values)):
+        current_value = values[t, 2]
+        if current_value > prev_value:
+            return prev_value
+        prev_value = current_value
+
+    return prev_value
 
 def calculate_zoomout_time(local_max_data):
     """Calculate zoomout time using the two largest values in the third column."""
@@ -454,27 +442,28 @@ def calculate_zoomout_time(local_max_data):
     # Find first maximum (last occurrence)
     max1_idx = len(values) - 1 - np.argmax(values[::-1] == np.max(values))
     max1_val = values[max1_idx]
-    max1_time = local_max_data[max1_idx, 0]
+    max1_time = local_max_data[max1_idx, 1]
 
     if len(values) < 2:
-        return float('inf'), max1_val
+        return float('inf')
 
     # Find second maximum (last occurrence excluding first max)
     mask = np.arange(len(values)) != max1_idx
     remaining_values = values[mask]
     max2_val = np.max(remaining_values)
     max2_idx = np.where((values == max2_val) & mask)[0][-1]
-    max2_time = local_max_data[max2_idx, 0]
+    max2_time = local_max_data[max2_idx, 1]
 
-    return int((max1_time + max2_time) // 2), max1_val
+    return max2_time + (max1_time + max2_time) / 4
 
-def extract_max_strain_and_zoomout_time(dir):
+def extract_max_strain_and_zoomout_time(dir, r_ext) -> Tuple:
     """Optimized version using batched file I/O and vectorized operations."""
-    max_strain = float('-inf')
+    strain_after_burst = float('-inf')
     min_zoomout_time = float('inf')
+    max_strain = float('-inf')
 
     for l in range(ELL_MIN, ELL_MAX + 1):
-        file_path = os.path.join(dir, f"Rpsi4_r0100.0_l{l}_conv_to_strain.txt")
+        file_path = os.path.join(dir, f"Rpsi4_r{0 if r_ext < 1000 else ""}{r_ext}_l{l}_conv_to_strain.txt")
 
         # Precompute all possible columns for this l
         max_col = 4 * l + 2
@@ -510,17 +499,77 @@ def extract_max_strain_and_zoomout_time(dir):
                 continue
 
             data_max_local_max = local_max_iterative(max_strain_data)
-            zi, mv = calculate_zoomout_time(data_max_local_max)
+            data_max_max = get_max_max(data_max_local_max)
+            zt = calculate_zoomout_time(data_max_max)
+            sab = get_strain_after_burst(max_strain_data, data_max_local_max[0, 2])
+            mv = np.max(data_max_max[:, 2])
 
             # Update tracking values
+            if sab > strain_after_burst:
+                strain_after_burst = sab
+            if zt < min_zoomout_time:
+                min_zoomout_time = zt
             if mv > max_strain:
                 max_strain = mv
-            if zi != float('inf'):
-                zt = time_col[int(zi)]
-                if zt < min_zoomout_time:
-                    min_zoomout_time = zt
 
-    return max_strain, min_zoomout_time
+    return strain_after_burst, max_strain, min_zoomout_time
+
+def compute_strain_to_mesh(
+    strain_azi: NDArray[np.float32],
+    equal_times: NDArray[np.float32],
+    radius_values: NDArray[np.float32],
+    lerp_times: NDArray[np.float32],  # Precomputed 2D array of interpolation points
+    time_array: NDArray[np.float32],
+    status_messages=True
+) -> NDArray[np.float32]:
+    """Optimized strain computation using precomputed strain values with reduced memory footprint.
+
+    Args:
+        strain_azi: Precomputed strain values as a 2D array of shape (n_azi_pts, n_time_points).
+        equal_times: Array of times at which to interpolate the strain.
+        radius_values: Array of radius values for which to compute the strain on the mesh.
+        lerp_times: Precomputed 2D array of interpolation points of shape (n_rad_pts, n_times).
+        time_array: Original time points corresponding to the strain_azi data.
+
+    Returns:
+        NDArray[np.float32]: 3D array of shape (n_rad_pts, n_azi_pts, n_times) containing the interpolated strain values.
+    """
+    n_rad_pts = len(radius_values)
+    n_azi_pts = strain_azi.shape[0]
+    n_times = len(equal_times)
+
+    # Compute strain_azi in chunks to reduce peak memory usage
+    chunk_size = min(100, n_azi_pts)  # Adjust based on available memory
+    strain_to_mesh = np.zeros((n_rad_pts, n_azi_pts, n_times), dtype=np.float32)
+
+    for start_idx in range(0, n_azi_pts, chunk_size):
+        end_idx = min(start_idx + chunk_size, n_azi_pts)
+        strain_azi_chunk = strain_azi[start_idx:end_idx, :]
+
+        # Interpolate each azimuth in the current chunk
+        for i, azi_idx in enumerate(range(start_idx, end_idx)):
+            strain_to_mesh[:, azi_idx, :] = np.interp(
+                lerp_times,
+                time_array,
+                strain_azi_chunk[i, :],
+                left=np.nan,
+                right=np.nan
+            )
+            # Update status
+            if status_messages:
+                progress = (start_idx + i) / (n_azi_pts - 1) * 100
+                print(f"\rProgress: {int(progress)}% completed", end="", flush=True)
+
+    # Create a new line after status messages
+    if status_messages:
+        print()
+
+    return strain_to_mesh
+
+def idx_time(array, time):
+    diff = np.abs(array - time)
+    zero_match = np.where(diff == 0)[0]
+    return zero_match[0] if zero_match.size > 0 else np.argmin(diff)
 
 def main() -> None:
     """
@@ -539,23 +588,19 @@ def main() -> None:
     # Check initial parameters
     time0 = time.time()
     if USE_SYS_ARGS:
-        if len(sys.argv) != 5:
+        if len(sys.argv) != 3:
             raise RuntimeError(
                 """Please include path to merger data as well as the psi4 extraction radius of that data.
                 Usage (spaces between arguments): python3 
                                                   scripts/animation_main.py 
                                                   <path to data folder> 
-                                                  <extraction radius (r/M) (4 digits, e.g. 0100)>
-                                                  <mass of one black hole>
-                                                  <mass of other black hole>"""
+                                                  <extraction radius (r/M) (4 digits, e.g. 0100)>"""
             )
         else:
             # change directories and extraction radius based on inputs
             bh_dir = str(sys.argv[1])
             psi4_output_dir = os.path.join(bh_dir, "converted_strain")
             ext_rad = float(sys.argv[2])
-            bh1_mass = float(sys.argv[3])
-            bh2_mass = float(sys.argv[4])
             movie_dir = os.path.join(str(sys.argv[1]), "movies")
         #if ask_user(
         #    f"Save converted strain to {bh_dir} ? (Y/N): "
@@ -590,10 +635,10 @@ def main() -> None:
         os.makedirs(movie_file_path)
     time1 = time.time()
     # Mathematical parameters
+    # radius for the mesh
+    display_radius = 300
     n_rad_pts = 450
     n_azi_pts = 180
-    display_radius = 300
-    omitted_radius_length = 1.45*(max_bh_dist(bh_file_path, 3, 4) + bh_scaling_factor * max(bh1_mass, bh2_mass))
     colat = np.pi / 2  # colatitude angle representative of the plane of merger
 
     # Cosmetic parameters
@@ -605,16 +650,14 @@ def main() -> None:
     bh_color = (0.1, 0.1, 0.1)
     time2 = time.time()
 
-    # ---Preliminary Calculations---
     if STATUS_MESSAGES:
         print(
             """**********************************************************************
     Initializing grid points..."""
         )
     strain_array, grid, points = initialize_tvtk_grid(n_azi_pts, n_rad_pts)
-    width = 0.5 * omitted_radius_length
-    dropoff_radius = width + omitted_radius_length
     time3=time.time()
+
     if STATUS_MESSAGES:
         print(
             """**********************************************************************
@@ -627,14 +670,47 @@ def main() -> None:
     n_times = len(time_array)
     n_frames = int(n_times / save_rate)
 
-    # theta and radius values for the mesh
-    radius_values = np.linspace(0, display_radius, n_rad_pts)
-    azimuth_values = np.linspace(0, 2 * np.pi, n_azi_pts, endpoint=False)
-
-    rv, az = np.meshgrid(radius_values, azimuth_values, indexing="ij")
-    x_values = rv * np.cos(az)
-    y_values = rv * np.sin(az)
     time4=time.time()
+
+    if STATUS_MESSAGES:
+        print(
+            """**********************************************************************
+    Calculating black hole trajectories..."""
+        )
+
+    # Import black hole data
+    bh_data = np.loadtxt(bh_file_path, skiprows=15)
+    merge_time = bh_data[0, 0]
+    bh_data = np.delete(bh_data, 0, axis=0)
+
+    merge_idx = idx_time(bh_data[:, 0], merge_time)
+
+    bh1_mass = 1
+    bh2_mass = np.mean(bh_data[:merge_idx, 14]) / np.mean(bh_data[:merge_idx, 1])
+
+
+    if bh1_mass > bh2_mass:  # then swap
+        bh1_mass, bh2_mass = bh2_mass, bh1_mass
+
+    bh_time = bh_data[:, 0]
+    bh1_x0 = bh_data[:, 3]
+    bh1_y0 = bh_data[:, 4]
+    bh1_z0 = np.zeros(len(bh1_x0))
+
+    # Vectorized time array generation
+    initial_time, final_time = time_array[0], time_array[-1]
+    equal_times = np.linspace(initial_time, final_time, num=n_times)
+    merge_idx2 = idx_time(equal_times, merge_time)
+
+    bh1_x, bh1_y, bh1_z = interpolate_coords_by_time(
+        bh_time, bh1_x0, bh1_y0, bh1_z0, equal_times
+    )
+
+    bh_mass_ratio = bh1_mass / bh2_mass
+    bh2_x = np.concatenate((-bh1_x[:merge_idx2] * bh_mass_ratio, bh1_x[merge_idx2:]))
+    bh2_y = np.concatenate((-bh1_y[:merge_idx2] * bh_mass_ratio, bh1_y[merge_idx2:]))
+    bh2_z = np.concatenate((-bh1_z[:merge_idx2] * bh_mass_ratio, bh1_z[merge_idx2:]))
+    time5=time.time()
 
     if STATUS_MESSAGES:
         print(
@@ -642,21 +718,35 @@ def main() -> None:
     Calculating cosmetic data..."""
         )
 
-    max_strain, zoomout_time = extract_max_strain_and_zoomout_time(os.path.join(bh_dir, 'converted_strain'))
-    amplitude_scale_factor = 80 / max_strain
+    strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(os.path.join(bh_dir, 'converted_strain'), ext_rad)
+    amplitude_scale_factor = 30 / symlog(strain_after_burst)
 
     print(f"Max strain: {max_strain}")
     print(f"Amplitude scale factor: {amplitude_scale_factor}")
     print(f"Zoomout time: {zoomout_time}")
 
-    # Vectorized time array generation
-    initial_time, final_time = time_array[0], time_array[-1]
-    equal_times = np.linspace(initial_time, final_time, num=n_times)
-
     # Find closest index using vectorized operations
-    zoomout_diff = np.abs(equal_times - zoomout_time)
-    zero_match = np.where(zoomout_diff == 0)[0]
-    zoomout_idx = zero_match[0] if zero_match.size > 0 else np.argmin(zoomout_diff)
+    zoomout_idx = idx_time(equal_times, zoomout_time)
+
+    # Find radius of the center hole in the mesh
+    omitted_radius_length = 1.45*(np.sqrt(np.max(bh1_x0*bh1_x0 + bh1_y0*bh1_y0)) + bh_scaling_factor * max(bh1_mass, bh2_mass))
+
+    # Find point at which to taper off gravitational waves
+    width = 0.5 * omitted_radius_length
+    dropoff_radius = width + omitted_radius_length
+
+    # radius for the mesh
+    display_radius = 300
+    n_rad_pts = 450
+    n_azi_pts = 180
+
+    # theta and radius values for the mesh
+    radius_values = np.linspace(0, display_radius, n_rad_pts)
+    azimuth_values = np.linspace(0, 2 * np.pi, n_azi_pts, endpoint=False)
+
+    rv, az = np.meshgrid(radius_values, azimuth_values, indexing="ij")
+    x_values = rv * np.cos(az)
+    y_values = rv * np.sin(az)
 
     if STATUS_MESSAGES:
         print(
@@ -667,39 +757,17 @@ def main() -> None:
     # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
     strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data).real
     lerp_times = generate_interpolation_points(equal_times, radius_values, ext_rad)
-    strain_to_mesh = np.zeros((n_rad_pts, n_azi_pts, n_times))
 
-    for i in range(n_azi_pts):
-        # strain_azi, a function of time_array, is evaluated at t = lerp_times.
-        strain_to_mesh[:, i, :] = np.interp(lerp_times, time_array, strain_azi[i, :])
-
-    if STATUS_MESSAGES:
-        print(
-            """**********************************************************************
-    Calculating black hole trajectories..."""
-        )
-    time5=time.time()
-    # Import black hole data
-    if bh1_mass > bh2_mass:  # then swap
-        bh1_mass, bh2_mass = bh2_mass, bh1_mass
-    # _ = next(reader)  # uncomment to skip the header row
-    bh_data = np.loadtxt(bh_file_path, skiprows=14)
-    bh_time = bh_data[:, 0]
-    # x is flipped because the data is in a different coordinate system
-    bh1_x0 = -bh_data[:, 3]
-    # z axis in the data is interpreted as y axis in the visualization
-    bh1_y0 = bh_data[:, 4]
-    bh1_z0 = np.zeros(len(bh1_x0))
-
-    bh1_x, bh1_y, bh1_z = interpolate_coords_by_time(
-        bh_time, bh1_x0, bh1_y0, bh1_z0, equal_times
+    strain_to_mesh = compute_strain_to_mesh(
+        strain_azi, 
+        equal_times, 
+        radius_values, 
+        lerp_times,
+        time_array
     )
 
-    bh_mass_ratio = bh1_mass / bh2_mass
-    bh2_x = -bh1_x * bh_mass_ratio
-    bh2_y = -bh1_y * bh_mass_ratio
-    bh2_z = -bh1_z * bh_mass_ratio
     time6=time.time()
+
     if STATUS_MESSAGES:
         print(
             """**********************************************************************
@@ -724,9 +792,8 @@ def main() -> None:
     bh2 = create_sphere(engine, bh2_scaled, bh_color)
 
     # Precompute geometric data with vectorization
-    R, A = np.meshgrid(radius_values, azimuth_values, indexing='ij')
-    valid_mask = (R > omitted_radius_length).ravel()
-    dropoff_2D = (0.5 + 0.5 * erf((R - dropoff_radius)/width)).ravel() * amplitude_scale_factor
+    valid_mask = (rv > omitted_radius_length).ravel()
+    dropoff_2D = (0.5 + 0.5 * erf((rv - dropoff_radius)/width)).ravel() * amplitude_scale_factor
     x_flat, y_flat = x_values.ravel(), y_values.ravel()
 
     # Initialize VTK data structures once
@@ -746,12 +813,11 @@ def main() -> None:
         time_indices < zoomout_idx,
         80,
         80 + (time_indices - zoomout_idx) * 0.175
-    ), 370)
+    ), 350)
 
     # Initialize timing and progress tracking
     start_time = time.time()
     status_interval = max(n_valid // 10, 1)
-
 
     start_time = time.time()
     percentage = list(np.round(np.linspace(0, n_times, 100)).astype(int))
@@ -783,7 +849,7 @@ def main() -> None:
 
             # Update strain visualization
             strain_flat = strain_to_mesh[..., time_idx].ravel()
-            np_points[:, 2] = np.where(valid_mask, strain_flat * dropoff_2D, np.nan)
+            np_points[:, 2] = np.where(valid_mask, symlog(strain_flat) * dropoff_2D, np.nan)
             vtk_array.modified()
 
             # Update grid
@@ -819,125 +885,6 @@ def main() -> None:
 
     _ = anim()
     mlab.show()
-
-    """# Create Mayavi objects
-    # Configure engine and rendering upfront
-    mlab.options.offscreen = False  # Uncomment for 30-50% faster rendering
-    engine = Engine()
-    engine.start()
-    mlab.figure(engine=engine, size=resolution)
-
-    # Precompute scaled values once
-    bh1_scaled = bh1_mass * bh_scaling_factor
-    bh2_scaled = bh2_mass * bh_scaling_factor
-
-    # Create visualization objects
-    create_gw(engine, grid, gw_color, display_radius, wireframe)
-    bh1 = create_sphere(engine, bh1_scaled, bh_color)
-    bh2 = create_sphere(engine, bh2_scaled, bh_color)
-
-    # Set initial view parameters in one call
-    mlab.view(
-        azimuth=60, 
-        elevation=50, 
-        distance=80, 
-        focalpoint=(0, 0, 0),
-        reset_roll=True
-    )
-
-    # Initialize timing and progress tracking
-    start_time = time.time()
-    percentage = np.round(np.linspace(0, n_times, 100)).astype(int).tolist()
-
-    def anim():
-
-        # Precompute all valid time indices
-        valid_indices = [i for i in range(n_times) if i % save_rate == 0]
-        n_valid = len(valid_indices)
-
-        # Precompute geometric data with proper broadcasting
-        dropoff_factors = 0.5 + 0.5 * erf((radius_values - dropoff_radius) / width)
-        valid_radii = radius_values > omitted_radius_length
-        x_flat = x_values.ravel()
-        y_flat = y_values.ravel()
-        n_points = len(x_flat)
-
-        # Create meshgrid for broadcasting
-        R, A = np.meshgrid(radius_values, azimuth_values, indexing='ij')
-        valid_mask = (R > omitted_radius_length).ravel()
-        dropoff_2D = (dropoff_factors[:, np.newaxis] * np.ones_like(A)).ravel()
-
-        # Precompute camera parameters
-        elevations = np.maximum(50 - np.arange(n_times) * 0.016, 34)
-        distances = np.where(
-            np.arange(n_times) < zoomout_idx,
-            80,
-            np.minimum(80 + (np.arange(n_times) - zoomout_idx) * 0.175, 370)
-        )
-
-        # Initialize VTK points array properly
-        points = tvtk.Points()
-        vtk_array = tvtk.FloatArray()
-        vtk_array.number_of_components = 3
-        vtk_array.number_of_tuples = n_points
-        points.data = vtk_array
-
-        # Get numpy array view with proper shape (N, 3)
-        np_points = vtk_array.to_array().reshape(-1, 3)
-        np_points[:, 0] = x_flat  # Set X coordinates
-        np_points[:, 1] = y_flat  # Set Y coordinates
-
-        for idx, time_idx in enumerate(valid_indices):
-            # Status messages
-            if idx == 10:
-                eta = (time.time() - start_time) * n_valid / 10
-                print(f"Creating {n_valid} frames\nETA: {dhms_time(eta)}")
-
-            # Update black hole positions
-            change_object_position(bh1, (bh1_x[time_idx], bh1_y[time_idx], bh1_z[time_idx]))
-            change_object_position(bh2, (bh2_x[time_idx], bh2_y[time_idx], bh2_z[time_idx]))
-
-            # Calculate strain values
-            strain_flat = strain_to_mesh[..., time_idx].ravel()
-
-            # Update Z-values using numpy interface
-            z_values = np.where(
-                valid_mask,
-                strain_flat * amplitude_scale_factor * dropoff_2D,
-                np.nan
-            )
-
-            # Update Z coordinates directly in preallocated array
-            np_points[:, 2] = z_values
-            vtk_array.modified()
-            points.modified()
-
-            # Update strain array
-            strain_array.from_array(strain_flat[valid_mask])
-            grid._set_points(points)
-            grid.modified()
-
-            # Update camera view
-            mlab.view(
-                elevation=elevations[time_idx],
-                distance=distances[time_idx],
-                focalpoint=(0, 0, 0)
-            )
-
-            # Save frame
-            mlab.savefig(os.path.join(movie_file_path, f"z_frame_{idx:05d}.png"))
-
-            # Exit condition
-            if idx == n_valid - 1:
-                total_time = time.time() - start_time
-                print(f"\nSaved {n_valid} frames in {dhms_time(total_time)}")
-                convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
-                mlab.close()
-                exit()
-
-    _ = anim()
-    mlab.show()"""
-
 
 # This should automatically create the movie file...
 # if it doesn't work, run the following in the movie directory:
