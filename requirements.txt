@@ -1,9 +1,10 @@
 scipy
+h5py
 quaternionic
 spherical
 opencv-python-headless
 numpy>=1.0
-vtk<9.4
+vtk>=9.4
 pillow
 pytest
 traitsui
