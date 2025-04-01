@@ -23,7 +23,7 @@ If you'd like to skip straight to usage, run the following lines to get started.
 #### Windows
 
 ```
-git clone https://github.com/tyndalestutz/bh_vis.git
+git clone https://github.com/Zaemapar/bh_vis.git
 cd bh_vis
 Python -m venv .venv
 .venv/scripts/Activate.ps1
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 #### UNIX/OSX
 
 ```
-git clone https://github.com/tyndalestutz/bh_vis.git
+git clone https://github.com/Zaemapar/bh_vis.git
 cd bh_vis
 python3 -m venv .venv
 source .venv/bin/activate
