@@ -7,7 +7,6 @@ moved to their respective positions and the render is saved as a .png file.
 
 import os
 import sys
-import csv
 import time
 from math import erf
 from typing import Tuple, Any
@@ -17,7 +16,7 @@ from scipy.interpolate import interp1d
 from scipy.special import erf  # Vectorized error function for arrays
 import quaternionic
 import spherical
-import cv2 # pip install opencv-python
+import imageio.v2 as imageio
 import vtk  # Unused, but Required by TVTK.
 from tvtk.api import tvtk
 from mayavi import mlab
@@ -72,13 +71,17 @@ def generate_interpolation_points(
     r_ext: float,
 ) -> NDArray[np.float64]:
     """
-    Generates a 2D array of adjusted time values for wave strain interpolation.
+    Fills out a 2D array of adjusted time values for the wave strain to be
+    linearly interpolated to. First index of the result represents the simulation
+    time time_idx (aka which mesh), and the second index represents radial distance to
+    interpolate to.
 
-    :param time_array: 1D NumPy array of strain time indices.
-    :param radius_values: 1D NumPy array of radial points on the mesh.
-    :param r_ext: Extraction radius of the original data.
-    :return: A 2D NumPy array (n_radius, n_times) of adjusted time values.
+    :param time_array: numpy array of of strain time time_idxs.
+    :param radius_values: numpy array of the radial points on the mesh.
+    :param r_ext: extraction radius of the original data.
+    :return: a 2D numpy array (n_radius, n_times) of time values.
     """
+
     # Precompute min and max of time_array
     time_min, time_max = time_array.min(), time_array.max()
 
@@ -121,13 +124,20 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
     Sets initial parameters for the mesh generation module and returns
     a circular, polar mesh with manipulation objects to write and save data.
 
-    :param num_azi: Number of azimuthal points on the mesh.
-    :param num_radius: Number of radial points on the mesh.
-    :returns: A tuple containing:
-              - tvtk.FloatArray: Array to store strain data.
-              - tvtk.UnstructuredGrid: The unstructured grid representing the mesh.
-              - tvtk.Points: Points object for the mesh.
+    :param num_azi: number of azimuthal points on the mesh
+    :param num_radius: number of radial points on the mesh
+    :returns: tvtk.FloatArray,
+              tvtk.UnstructuredGrid,
+              tvtk.Points
+    >>> strain_array, grid, points = initialize_tvtk_grid(3, 4)
+    >>> isinstance(strain_array, tvtk.FloatArray)
+    True
+    >>> isinstance(grid, tvtk.UnstructuredGrid)
+    True
+    >>> isinstance(points, tvtk.Points)
+    True
     """
+
     # Create tvtk objects
     points = tvtk.Points()
     grid = tvtk.UnstructuredGrid()
@@ -177,6 +187,7 @@ def create_gw(
     :param display_radius: Controls the visible radius for wireframe contours.
     :param wireframe: Whether to display the strain as a wireframe with contours.
     """
+
     # Get the current scene efficiently
     scene = getattr(engine, "current_scene", engine.scenes[0])
 
@@ -227,6 +238,7 @@ def create_sphere(
     :param color: Color of the sphere as an RGB tuple (0, 0, 0) to (1, 1, 1).
     :return: The Surface object representing the sphere.
     """
+
     # Use the current scene
     scene = engine.current_scene if hasattr(engine, "current_scene") else engine.scenes[0]
 
@@ -254,17 +266,27 @@ def change_object_position(obj: Surface, position: tuple[float, float, float]) -
     :param obj: Mayavi Surface object to reposition
     :param position: New (x, y, z) position as a tuple of floats
     """
+
     obj.actor.actor.position = position  # Direct tuple assignment (no numpy conversion needed)
 
 def rescale_object(obj: Surface, size: float) -> None:
+    """
+    Rescales a Mayavi surface equally in all directions by a given factor.
+
+    :param obj: Mayavi Surface object to reposition
+    :param size: Scale factor to multiply dimensions by
+    """
+
     obj.actor.actor.scale = (size, size, size)  # Direct tuple assignment (no numpy conversion needed)
 
 def dhms_time(seconds: float) -> str:
     """
     Converts a given number of seconds into a string indicating the remaining time.
+
     :param seconds: Number of seconds
     :return: A string indicating the remaining time (days, hours, minutes)
     """
+
     divisors = (
         (86400, "days"),
         (3600, "hours"),
@@ -279,49 +301,81 @@ def dhms_time(seconds: float) -> str:
             parts.append(f"{value} {label}")
     return " ".join(parts)
 
-def convert_to_movie(input_path: str, movie_name: str, fps: int = 24) -> None:
+def convert_to_movie(input_path: str, movie_name: str, fps: int = 24, status_messages: bool = True) -> None:
     """
-    Converts a series of .png files into a movie using OpenCV.
+    Converts a series of .png files into a movie using imageio.
+
     :param input_path: path to the directory containing the .png files
     :param movie_name: name of the movie file
     :param fps: frames per second (24 by default)
     """
-    frames = [f for f in os.listdir(input_path) if f.endswith(".png")]
-    frames.sort()
-    # Create a movie from the frames
-    ref = cv2.imread(os.path.join(input_path, frames[0]))
-    height, width, _ = ref.shape
-    video = cv2.VideoWriter(
-        os.path.join(input_path, f"{movie_name}.mp4"),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    if not video.isOpened():
-        print("Error: VideoWriter could not be opened.")
-    for frame in frames:
-        f = cv2.imread(os.path.join(input_path, frame))
-        video.write(f)
-    video.release()
 
-def ask_user(message: str):
+    # Efficient directory scanning with immediate sorting and filtering
+    with os.scandir(input_path) as it:
+        image_files = [entry.name for entry in it]
+
+    output_path = os.path.join(input_path, f"{movie_name}.mp4")
+    total_frames = len(image_files)
+
+    # Use context manager for automatic resource cleanup
+    with imageio.get_writer(
+        output_path,
+        fps=fps,
+        codec='libx264',
+        quality=8,
+        macro_block_size=None
+    ) as writer:
+
+        prev_progress = -1
+        input_path_obj = os.fspath(input_path)  # Cache path for faster joins
+
+        for i, img_file in enumerate(image_files, 1):
+            # Directly construct path string for maximum speed
+            file_path = f"{input_path_obj}/{img_file}"
+            writer.append_data(imageio.imread(file_path))
+
+            if status_messages:
+                # Integer-based progress tracking for minimal computation
+                current_progress = (i * 1000) // total_frames
+                if current_progress != prev_progress:
+                    print(f"\rProgress: {current_progress/10:.1f}% completed", end="", flush=True)
+                    prev_progress = current_progress
+
+        if status_messages:
+            print("\rProgress: 100.0% completed", flush=True)
+
+def ask_user(message: str) -> bool:
     """
     Allows user input in the command terminal to a Yes/No response.
     Returns boolean based on input.
 
     :param message: message to ask the user (indicate Y/N input).
     """
+
     response = input(message)
     if response.lower() != "y":
         return False
     else:
         return True
 
-def symlog(x):
+def symlog(x: float) -> float:
+    """
+    Computes the signed logarithm of float input x
+
+    :param x: Number for which to compute the signed logarithm
+    :return: The signed logarithm of the input
+    """
+
     return np.sign(x) * np.log1p(np.abs(x))  # log1p(x) = log(1 + x), avoids log(0) issues
 
-def max_strain_values(data):
-    """Identifies peak strain values where increasing/decreasing trends change."""
+def max_strain_values(data: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Identifies peak strain values where increasing/decreasing trends change.
+
+    :param data: Numpy 2D array of strain values with column 0 as time and column 1 as strain
+    :return: numpy 2D array of local maxima in data with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the max strain values 
+    """
     strain_vals = data[:, 1]
     times = data[:, 0]
     peaks = []
@@ -342,11 +396,20 @@ def max_strain_values(data):
 
         prev_val = current_val
 
-    peaks.append((len(strain_vals)-1, times[-1], abs(strain_vals[-1])))
+    if increasing:
+        peaks.append((len(strain_vals)-1, times[-1], abs(strain_vals[-1])))
     return np.array(peaks)
 
-def get_local_maxima(data):
-    """Identifies local maxima in the third column of the dataset."""
+def get_local_maxima(data: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Identifies local maxima in already maximized strain data.
+
+    :param data: Numpy 2D array of local maxima strain values with column 0 as the value's index in the original data, 
+    column 1 as the time, and column 2 as the strain values
+    :return: numpy 2D array of local maxima in local maxima data with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the max strain values
+    """
+
     time_col = data[:, 0]
     y_col = data[:, 1]
     values = data[:, 2]
@@ -369,7 +432,17 @@ def get_local_maxima(data):
         local_max.append([time_col[-1], y_col[-1], values[-1]])
     return np.array(local_max, dtype=np.float64) if local_max else np.empty((0, 3))
 
-def local_max_iterative(data):
+def local_max_iterative(data: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Iteratively finds local max of data until doing so further would reduce the size of the dataset by a certain factor
+
+    :param data: Numpy 2D array of local maxima strain values with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the strain values
+    :return: Numpy 2D array of strain values found by iterating searches for local maxima, with column 0 as the value's 
+    index in the original data, column 1 as the time, and column 2 as the strain values. Maximizing the data beyond this
+    point causes significant reductions in the information in the data.
+    """
+
     current = data
     while True:
         max_data = get_local_maxima(current)
@@ -379,7 +452,18 @@ def local_max_iterative(data):
         else:
             return max_data
 
-def get_max_max(data):
+def get_max_max(data: NDArray[np.float64]) -> NDArray[np.float64]:
+    """
+    Iteratively finds local max of data until doing so further would reduce the size of the dataset to below a certain
+    size.
+
+    :param data: Numpy 2D array of local maxima strain values with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the strain values
+    :return: Numpy 2D array of strain values found by iterating searches for local maxima, with column 0 as the value's
+    index in the original data, column 1 as the time, and column 2 as the strain values. Maximizing the data beyond this
+    point causes a loss of information rendering the data unreliable.
+    """
+
     current = data
     while True:
         current = get_local_maxima(current)
@@ -387,25 +471,42 @@ def get_max_max(data):
             break
     return current
 
-def get_strain_after_burst(values, end_of_burst_value):
-    if values.shape[0] < 3:
-        return 0
-    end_of_burst_index = np.where(values[:, 2] == end_of_burst_value)[0][0]
-    values_subset = values[end_of_burst_index:, 2]
-    if len(values_subset) < 2:
-        return values_subset[-1]
-    diff = values_subset[1:] > values_subset[:-1]
-    indices = np.where(diff)[0]
-    return values_subset[indices[0]] if indices.size > 0 else values_subset[-1]
+def get_strain_after_burst(data: NDArray[np.float64], end_of_burst_value: float) -> float:
+    """
+    Gets the strain value in the data immediately after the radiation burst has ended.
 
-def calculate_zoomout_time(local_max_data):
-    values = local_max_data[:, 2]
+    :param data: Numpy 2D array of local maxima strain values with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the strain values
+    :param end_of_burst_value: The value of the strain at the end of the radiation burst
+    :return: The strain value immediately after the burst has ended
+    """
+
+    if data.shape[0] < 3:
+        return 0
+    end_of_burst_index = np.where(data[:, 2] == end_of_burst_value)[0][0]
+    data_subset = data[end_of_burst_index:, 2]
+    if len(data_subset) < 2:
+        return data_subset[-1]
+    diff = data_subset[1:] > data_subset[:-1]
+    indices = np.where(diff)[0]
+    return data_subset[indices[0]] if indices.size > 0 else data_subset[-1]
+
+def calculate_zoomout_time(data: NDArray[np.float64]) -> float:
+    """
+    Calculates the time the visualization should start zooming out
+
+    :param data: Numpy 2D array of local maxima strain values with column 0 as the value's index in the original data,
+    column 1 as the time, and column 2 as the strain values
+    :return: The time at which to begin zooming out in the visualization
+    """
+
+    values = data[:, 2]
     if len(values) < 1:
         return float('inf')
     max1_val = values.max()
     max1_indices = np.where(values == max1_val)[0]
     max1_idx = max1_indices[-1]
-    max1_time = local_max_data[max1_idx, 1]
+    max1_time = data[max1_idx, 1]
 
     if len(values) < 2:
         return float('inf')
@@ -420,11 +521,22 @@ def calculate_zoomout_time(local_max_data):
     if not max2_candidate_indices:
         return float('inf')
     max2_idx = max2_candidate_indices[-1]
-    max2_time = local_max_data[max2_idx, 1]
+    max2_time = data[max2_idx, 1]
 
     return max2_time + (max1_time + max2_time) / 4
 
-def extract_max_strain_and_zoomout_time(dir, r_ext) -> Tuple:
+def extract_max_strain_and_zoomout_time(dir: str, r_ext: int) -> Tuple:
+    """
+    Calculates the strain immediately after the radiation burst, the max strain in the data in the input directory,
+    and the time the visualization should start zooming out
+
+    :param dir: The directory housing the strain data for each l
+    :param r_ext: The radius of extraction of the data
+    :return: The max strain immediately after the radiation burst, across all l and m
+             The max strain in all the data, across all l and m
+             The minimum time at which the visualization should start zooming out, across all l and m
+    """
+
     strain_after_burst = float('-inf')
     min_zoomout_time = float('inf')
     max_strain = float('-inf')
@@ -478,18 +590,18 @@ def compute_strain_to_mesh(
     time_array: NDArray[np.float32],
     status_messages=True
 ) -> NDArray[np.float32]:
-    """Optimized strain computation using precomputed strain values with reduced memory footprint.
-
-    Args:
-        strain_azi: Precomputed strain values as a 2D array of shape (n_azi_pts, n_time_points).
-        equal_times: Array of times at which to interpolate the strain.
-        radius_values: Array of radius values for which to compute the strain on the mesh.
-        lerp_times: Precomputed 2D array of interpolation points of shape (n_rad_pts, n_times).
-        time_array: Original time points corresponding to the strain_azi data.
-
-    Returns:
-        NDArray[np.float32]: 3D array of shape (n_rad_pts, n_azi_pts, n_times) containing the interpolated strain values.
     """
+    Computing mesh points in 3D using precomputed strain values with reduced memory footprint.
+
+    :param strain_azi: Precomputed strain values as a 2D array of shape (n_azi_pts, n_time_points).
+    :param equal_times: Array of times at which to interpolate the strain.
+    :param radius_values: Array of radius values for which to compute the strain on the mesh.
+    :param lerp_times: Precomputed 2D array of interpolation points of shape (n_rad_pts, n_times).
+    :param time_array: Original time points corresponding to the strain_azi data.
+    :param status_messages: Optional turning on progress bars
+    :return: 3D array of shape (n_rad_pts, n_azi_pts, n_times) containing the interpolated strain values.
+    """
+
     n_rad_pts = len(radius_values)
     n_azi_pts = strain_azi.shape[0]
     n_times = len(equal_times)
@@ -522,7 +634,15 @@ def compute_strain_to_mesh(
 
     return strain_to_mesh
 
-def idx_time(array, time):
+def idx_time(array: NDArray[np.float64], time: float) -> int:
+    """
+    Calculates the index at which the value of an array is closest to the value of time
+
+    :param array: Numpy array of time values
+    :param time: Target time to search for in an array
+    :return: The index at which the time is closest to the target time
+    """
+
     diff = np.abs(array - time)
     zero_match = np.where(diff == 0)[0]
     return zero_match[0] if zero_match.size > 0 else np.argmin(diff)
@@ -588,13 +708,12 @@ def main() -> None:
             ):
                 movie_number += 1
                 continue
-
             # Clear existing files if user confirms overwrite
             for file in os.listdir(movie_file_path):
                 os.remove(os.path.join(movie_file_path, file))
             break
 
-        os.makedirs(movie_file_path)
+        os.makedirs(movie_file_path, mode=0o755, exist_ok=True)
         break
 
     time1 = time.time()
@@ -709,9 +828,6 @@ def main() -> None:
 
     # Find closest index using vectorized operations
     zoomout_idx = idx_time(equal_times, zoomout_time)
-
-    # Find max z allowable without impeding view of center hole
-    z_max = omitted_radius_length / np.tan(elevation_angle)
 
     # radius for the mesh
     display_radius = 300
@@ -867,21 +983,17 @@ def main() -> None:
             # Save frame
             mlab.savefig(frame_filenames[idx])
 
-            # Early exit check
-            if idx == n_valid - 1:
-                total_time = time.time() - start_time
-                print("Done", end="\r")
-                print(
-                    f"\nSaved {n_frames} frames to {movie_file_path} ",
-                    f"in {dhms_time(total_time)}.",
-                )
-                print("Creating movie...")
-                convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
-                print(f"Movie saved to {movie_file_path}/{movie_dir_name}.mp4")
-                mlab.close()
-                sys.exit(0)
-
-            yield
+        mlab.close()
+        total_time = time.time() - start_time
+        print("Done", end="\r")
+        print(
+            f"\nSaved {n_frames} frames to {movie_file_path} ",
+            f"in {dhms_time(total_time)}.",
+        )
+        print("Creating movie...")
+        convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
+        print(f"Movie saved to {movie_file_path}/{movie_dir_name}.mp4")
+        sys.exit(0)
 
     _ = anim()
     mlab.show()
