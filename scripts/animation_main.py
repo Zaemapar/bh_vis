@@ -8,6 +8,7 @@ moved to their respective positions and the render is saved as a .png file.
 import os
 import sys
 import time
+import psutil
 from math import erf
 from typing import Tuple, Any
 import numpy as np
@@ -312,7 +313,7 @@ def convert_to_movie(input_path: str, movie_name: str, fps: int = 24, status_mes
 
     # Efficient directory scanning with immediate sorting and filtering
     with os.scandir(input_path) as it:
-        image_files = [entry.name for entry in it]
+        image_files = sorted([entry.name for entry in it])
 
     output_path = os.path.join(input_path, f"{movie_name}.mp4")
     total_frames = len(image_files)
@@ -607,7 +608,7 @@ def compute_strain_to_mesh(
     n_times = len(equal_times)
 
     # Compute strain_azi in chunks to reduce peak memory usage
-    chunk_size = min(100, n_azi_pts)  # Adjust based on available memory
+    chunk_size = min(int(psutil.virtual_memory().available / 7000000), n_azi_pts)  # Adjust based on available memory
     strain_to_mesh = np.zeros((n_rad_pts, n_azi_pts, n_times), dtype=np.float32)
 
     for start_idx in range(0, n_azi_pts, chunk_size):
