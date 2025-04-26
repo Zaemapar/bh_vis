@@ -45,12 +45,16 @@ To use these scripts with your own data, take a look at [this brief explanation]
 ## Creating a Movie From Your Own Data
 
 To create a movie using your own merger data, first ensure it is packaged in a folder in the format specified:
-&bull; Files containing psi 4 data for your specified extraction radius and ell modes
-     &bull; Psi 4 files must be named "Rpsi4_l{ell}-r{extraction_radius}.txt"
-     &bull; All values of ell must be consecutive
-     &bull; extraction_radius must be a one-decimal float preceded by a 0 if less than 1000
-&bull; One file containing position data for the black holes named "puncture_posns_vels_regridxyzU.txt"
-
+<ul> 
+     <li>Files containing psi 4 data for your specified extraction radius and ell modes
+          <ul>
+               <li>Psi 4 files must be named "Rpsi4_l{ell}-r{extraction_radius}.txt"</li>
+               <li>All values of ell must be consecutive</li>
+               <li>extraction_radius must be a one-decimal float preceded by a 0 if less than 1000</li>
+          </ul>
+     </li>
+     <li>One file containing position data for the black holes named "puncture_posns_vels_regridxyzU.txt"</li>
+</ul>
 When your data is formatted properly, run the following command inside the "scripts" directory:
 
 ```
