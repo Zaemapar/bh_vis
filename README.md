@@ -42,6 +42,23 @@ pip install -r requirements.txt
 
 To use these scripts with your own data, take a look at [this brief explanation](jupyter_notebooks/Tutorial-Compatible_Data_Formats.ipynb) of compatible data formats, along with instructions to prepare your data.
 
+## Creating a Movie From Your Own Data
+
+To create a movie using your own merger data, first ensure it is packaged in a folder in the format specified:
+&bull; Files containing psi 4 data for your specified extraction radius and ell modes
+     &bull; Psi 4 files must be named "Rpsi4_l{ell}-r{extraction_radius}.txt"
+     &bull; All values of ell must be consecutive
+     &bull; extraction_radius must be a one-decimal float preceded by a 0 if less than 1000
+&bull; One file containing position data for the black holes named "puncture_posns_vels_regridxyzU.txt"
+
+When your data is formatted properly, run the following command inside the "scripts" directory:
+
+```
+python3 animation_main.py {path_to_folder} {optional: use_symlog}
+```
+
+Use_symlog is a boolean and is False by default if not specified. Setting use_symlog to True will apply a signed logarithm scaling to the data. This may be useful if there is a large difference between the magnitudes of the gravitational waves from when the black holes start to orbit to the point when they merge.
+
 ## Troubleshooting  `animation_main.py`
 Depending on your system, Mayavi might require some adjustments in order to properly render. To fix the Linux graphics issue with `libstdcxx` and `OpenGL` rendering, try installing the dependencies through conda:
 
