@@ -31,14 +31,12 @@ import psi4_FFI_to_strain as psi4strain
 # Default parameters used when USE_SYS_ARGS is False
 BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
 MOVIE_DIR = "../data/GW150914_data/movies" # changeable with sys arguments
-ELL_MAX = 8
-ELL_MIN = 2
 S_MODE = -2
 EXT_RAD = 100 # changeable with sys arguments
 USE_SYS_ARGS = True # Change to turn on/off default parameters
 STATUS_MESSAGES = True # Change to turn on/off status reports during rendering
 
-def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128]) -> NDArray[np.complex128]:
+def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128], ell_min: int, ell_max: int) -> NDArray[np.complex128]:
     """
     Sum all the strain modes after factoring in the
     corresponding spin-weighted spherical harmonic
@@ -47,6 +45,8 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDA
     :param colat: Colatitude angle for the SWSH factor.
     :param azi: Azimuthal angles for the SWSH factor.
     :param mode_data: Numpy array containing strain data for all the modes, shape (n_modes, n_times).
+    :param ell_min: Minimum l mode to use in SWSH
+    :param ell_max: Maximum l mode to use in SWSH
     :return: A complex valued numpy array of the superimposed wave, shape (n_azi_pts, n_times).
 
     DocTests:
@@ -56,12 +56,12 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDA
     ...     for m in range(-l, l+1):
     ...         mode_data[mode_idx] = np.array([1+1j, 2+3j, 4+5j])
     ...         mode_idx += 1
-    >>> np.round(swsh_summation_angles(np.pi/2, np.array([0]), mode_data), 5)
+    >>> np.round(swsh_summation_angles(np.pi/2, np.array([0]), mode_data, 2, 8), 5)
     array([[ 4.69306 +4.69306j,  9.38612+14.07918j, 18.77224+23.4653j ]])
     """
 
     quat_arr = quaternionic.array.from_spherical_coordinates(colat, azi)
-    winger = spherical.Wigner(ELL_MAX, ELL_MIN)
+    winger = spherical.Wigner(ell_max, ell_min)
     # Create an swsh array shaped like (n_modes, n_quaternions)
     swsh_arr = winger.sYlm(S_MODE, quat_arr).T
     # mode_data has shape (n_modes, n_times), swsh_arr has shape (n_modes, n_pts).
@@ -250,7 +250,9 @@ def create_gw(
             gen_contour(coord, normal)
 
 def create_sphere(
-    engine: Engine, radius: float = 1, color: tuple[float, float, float] = (1, 0, 0)
+    engine: Engine,
+    radius: float = 1,
+    color: tuple[float, float, float] = (1, 0, 0)
 ) -> Surface:
     """
     Create and display a spherical surface with the given parameters.
@@ -401,21 +403,6 @@ def convert_to_movie(input_path: str, movie_name: str, fps: int = 24, status_mes
         if status_messages:
             print("\rProgress: 100.0% completed", flush=True) # Ensure 100% is shown
 
-def ask_user(message: str) -> bool:
-    """
-    Prompt the user with a Yes/No question in the command terminal.
-    Return boolean based on input.
-
-    :param message: Message to ask the user (should indicate Y/N input).
-    :return: True if the user enters 'Y' or 'y', False otherwise.
-
-    DocTests: Requires user interaction, cannot run in standard doctest. Will be skipped.
-    """
-
-    response = input(message)
-    # Check explicitly for 'y' (case-insensitive)
-    return response.lower() == "y"
-
 def max_strain_values(data: NDArray[np.float64]) -> NDArray[np.float64]:
     """
     Identify peak strain values where increasing/decreasing trends change.
@@ -485,7 +472,8 @@ def get_local_maxima(data: NDArray[np.float64]) -> NDArray[np.float64]:
 
     :param data: Numpy 2D array of local maxima strain values with column 0 as the original index,
              column 1 as the time, and column 2 as the absolute strain value.
-    :return: Numpy 2D array of local maxima among the input peaks, with the same column structure. Returns empty if input has < 3 points.
+    :return: Numpy 2D array of local maxima among the input peaks, with the same column structure.
+             Returns empty if input has < 3 points.
 
     DocTests:
     >>> peaks = np.array([[1., 1., 5.], [3., 3., 4.], [5., 5., 6.]])
@@ -622,8 +610,10 @@ def get_strain_after_burst(data: NDArray[np.float64], end_of_burst_value: float)
 
     :param data: Numpy 2D array of local maxima strain values (output of `max_strain_values`)
                  with column 0 as original index, column 1 as time, and column 2 as absolute strain value.
-    :param end_of_burst_value: The absolute value of the strain at the designated end of the radiation burst (must exist in data[:, 2]).
-    :return: The absolute strain value of the first peak immediately following the end_of_burst_value peak. Returns 0 if no such peak exists or data is too small.
+    :param end_of_burst_value: The absolute value of the strain at the designated end of the radiation burst
+                               (must exist in data[:, 2]).
+    :return: The absolute strain value of the first peak immediately following the end_of_burst_value peak.
+             Returns 0 if no such peak exists or data is too small.
 
     DocTests:
     >>> data = np.array([[1., 1., 5.], [3., 3., 4.], [5., 5., 6.], [7., 7., 3.], [9., 9., 2.]])
@@ -715,13 +705,20 @@ def calculate_zoomout_time(data: NDArray[np.float64]) -> float:
 
     return zoom_time
 
-def extract_max_strain_and_zoomout_time(dir_path: str, r_ext: int) -> Tuple[float, float, float]:
+def extract_max_strain_and_zoomout_time(
+    dir_path: str,
+    r_ext: int,
+    ell_min: int,
+    ell_max: int
+) -> Tuple[float, float, float]:
     """
     Calculate the overall maximum strain, the strain immediately after the burst,
     and the earliest zoomout time across all l,m modes in the input directory.
 
     :param dir_path: The directory housing the converted strain data files (e.g., Rpsi4_r..._l..._conv_to_strain.txt).
     :param r_ext: The radius of extraction of the data (used to construct filenames).
+    :param ell_min: The minimum l to be used in the calculations
+    :param ell_max: The maximum l to be used in the calculations
     :return: A tuple containing:
              - The maximum strain value found immediately after the burst across all processed modes.
              - The overall maximum strain value found in the iteratively maximized data across all processed modes.
@@ -734,7 +731,7 @@ def extract_max_strain_and_zoomout_time(dir_path: str, r_ext: int) -> Tuple[floa
     overall_max_strain = float('-inf')
     files_processed = 0
 
-    for l in range(ELL_MIN, ELL_MAX + 1):
+    for l in range(ell_min, ell_max + 1):
          # Construct filename safely
         filename = f"Rpsi4_r{0 if r_ext < 1000 else ''}{r_ext}_l{l}_conv_to_strain.txt"
         file_path = os.path.join(dir_path, filename)
@@ -747,12 +744,12 @@ def extract_max_strain_and_zoomout_time(dir_path: str, r_ext: int) -> Tuple[floa
 
         try:
             # Load data, skipping header lines dynamically
-            # Header lines = 1 (comment) + (number of modes = 2l+1) * 2 (Re/Im lines)? Assuming header structure is consistent.
+            # Header lines = 1 (comment) + (number of modes = 2l+1) * 2 (Re/Im lines)
             num_skip_rows = 4*l+3
             data_all = np.loadtxt(file_path, skiprows=num_skip_rows, usecols=cols_to_use)
             files_processed += 1
         except FileNotFoundError:
-            # print(f"Warning: File not found {file_path}, skipping l={l}.")
+            print(f"Warning: File not found {file_path}, skipping l={l}.")
             continue
         except ValueError as e:
              # Catch errors if columns don't exist or data is malformed
@@ -813,7 +810,7 @@ def extract_max_strain_and_zoomout_time(dir_path: str, r_ext: int) -> Tuple[floa
             overall_max_strain = max(overall_max_strain, mode_max_strain)
 
     if files_processed == 0:
-         raise FileNotFoundError(f"No valid strain files found in directory {dir_path} for l={ELL_MIN} to {ELL_MAX}.")
+         raise FileNotFoundError(f"No valid strain files found in directory {dir_path} for l={ell_min} to {ell_max}.")
 
     # Handle cases where no valid peaks/times were found
     if overall_strain_after_burst == float('-inf'): overall_strain_after_burst = 0.0
@@ -1017,32 +1014,27 @@ def main() -> None:
  
     if USE_SYS_ARGS:
         argc = len(sys.argv)
-        if argc not in (3, 4):
+        if argc not in (2, 3):
             # Use raise RuntimeError for error exit
             raise RuntimeError(
-                f"""Usage: python {sys.argv[0]} <path_to_data_folder> <extraction_radius> [use_symlog: True/False]
+                f"""Usage: python {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]
 Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
                 Arguments:
                   <path_to_data_folder>: Path to the directory containing merger data and converted strain.
-                  <extraction_radius>: Psi4 extraction radius (r/M), e.g., 100.
                   [use_symlog]: Optional. Use symmetric log scale for strain (True/False, default: False)."""
             ) # Use f-string for cleaner formatting
         else:
             # Change directories and extraction radius based on inputs
             bh_dir = str(sys.argv[1])
-            try:
-                 ext_rad = float(sys.argv[2]) # Ensure ext_rad is float
-            except ValueError:
-                 raise ValueError("Extraction radius must be a number.")
 
             # Set psi4_output_dir relative to bh_dir
             psi4_output_dir = os.path.join(bh_dir, "converted_strain")
             movie_dir = os.path.join(bh_dir, "movies")  # Optimized path construction
 
             # Handle optional symlog argument
-            if argc == 4:
-                symlog_arg = sys.argv[3].lower()
+            if argc == 3:
+                symlog_arg = sys.argv[2].lower()
                 if symlog_arg == 'true':
                     use_symlog = True
                 elif symlog_arg == 'false':
@@ -1053,7 +1045,6 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     else: # Use default parameters defined at the top
         bh_dir = BH_DIR
         movie_dir = MOVIE_DIR
-        ext_rad = EXT_RAD # Already float
         psi4_output_dir = os.path.join(bh_dir, "converted_strain")
         # Default mass ratio for GW150914 already set
         # Default use_symlog is False
@@ -1082,8 +1073,9 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         movie_file_path = os.path.join(movie_dir, movie_dir_name)
 
         if os.path.exists(movie_file_path):
-            # Use f-string in ask_user prompt
-            if not ask_user(f"{movie_file_path} already exists. Would you like to overwrite it? Y/N: "):
+            # Ask the user for permission to override existing file with same name
+            response = input(f"{movie_file_path} already exists. Would you like to overwrite it? Y/N: ")
+            if response.lower() != 'y':
                 movie_number += 1
                 continue
 
@@ -1111,6 +1103,78 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             break # Exit loop after successful creation or confirmation
         except OSError as e:
             raise RuntimeError(f"Could not create output directory {movie_file_path}: {e}")
+
+    # --- Extraction Radius Calculations ---
+    bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
+    bh_files = [f for f in bh_file_list if os.path.isfile(os.path.join(bh_dir, f))] # List the names of these files
+
+    extraction_radii = np.empty(0)
+    for b in bh_files:
+        # Attempt to convert the part of the file name that is supposed to be the extraction radius into a float
+        try:
+            radius_extraction = float(b[-10:-4])
+        except ValueError:
+            continue # Skip over files that fail or don't have an extraction radius
+        if radius_extraction not in extraction_radii:
+            extraction_radii = np.append(extraction_radii, radius_extraction) # Save the extraction radius if unique
+
+    size = len(extraction_radii)
+    if size == 1:
+        ext_rad = extraction_radii[0] # If only one extraction radius is found, use that one
+    elif size == 0:
+        # If no extraction radii are found, the files are probably incorrectly named
+        raise RuntimeError("No psi 4 files found in the directory. Ensure psi 4 files are formatted as such: Rpsi4_l#-r####.#")
+    elif size > 1:
+        # Handle the case where multiple extraction radii are found
+        print("Warning: Multiple extraction radii found in the directory.")
+        while True:
+            response = input("Please enter the extraction radius you would like to use: ")
+            try:
+                # Attempt to parse user input into extraction radius float
+                radius_extraction = float(response)
+                # Print availabe extraction radii if user inputs one that is unavailable
+                if radius_extraction not in extraction_radii:
+                    print("Available extraction radii:")
+                    for r in extraction_radii:
+                        print(r)
+                else:
+                    break # End the loop if a valid extraction radius has been entered
+            except ValueError:
+                print("Please enter a float from 0.0 to 9999.0.") # Handle the case where something else was entered
+        ext_rad = radius_extraction
+    print(f"Using extraction radius {ext_rad} for psi 4 data")
+
+    # --- Minimum and Maximum Ell Mode Calculations ---
+    ells = np.empty(0)
+    # Convert extraction radius used into a properly formatted string ####.# to determine which files to search
+    str_ext_rad = ("0" if ext_rad < 1000 else "") + str(ext_rad)
+    for b in bh_files:
+        # Only search files with the appropriate extraction radius
+        if b[-10:-4] == str_ext_rad:
+            # Attempt to convert the part of the file name that is supposed to be the mode into an integer
+            try:
+                ell = float(b[7])
+            except ValueError:
+                continue # Skip over files that fail or don't have a mode
+            if ell not in ells:
+                ells = np.append(ells, ell) # Save the ell mode if unique
+
+    ells = np.sort(ells.astype(int)) # Put the ell modes in order
+    if len(ells) == 0:
+        # If no modes are found, the files are probably incorrectly named
+        raise RuntimeError("No psi 4 files found in the directory. Ensure psi 4 files are formatted as such: Rpsi4_l#-r####.#")
+    # Extract the min and max ells
+    ell_min = ells[0]
+    ell_max = ells[-1]
+
+    # Calculate the difference between consecutive ells to detect gaps
+    diff_ells = np.diff(ells)
+    gaps = np.where(diff_ells > 1)
+    # If there are any gaps, raise an error
+    if gaps[0].size > 0:
+        raise RuntimeError(f"A gap was detected in the l modes: Minimum l is {ell_min}, maximum l is {ell_max}, but no l={gaps[0][0] + ell_min + 1} file was found")
+
+    print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for psi 4 data")
 
     # --- Simulation & Visualization Parameters ---
     display_radius = 300  # radius for the mesh visualization
@@ -1148,7 +1212,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # Convert psi4 to strain and load strain data
     try:
         # Pass the directory where the strain files are expected
-        time_array, mode_data = psi4strain.psi4_ffi_to_strain(bh_dir, psi4_output_dir, ELL_MAX, ext_rad)
+        time_array, mode_data = psi4strain.psi4_ffi_to_strain(bh_dir, psi4_output_dir, ell_max, ext_rad)
     except FileNotFoundError as e:
          raise FileNotFoundError(f"Error loading strain data: {e}. Ensure converted files exist in {psi4_output_dir} or check psi4strain function.")
     except Exception as e:
@@ -1172,7 +1236,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # Import black hole data using more efficient loading
     try:
         # Skiprows assumes a fixed header length. Verify this matches the file spec.
-        bh_data = np.loadtxt(bh_file_path, skiprows=15, dtype=np.float64)
+        bh_data = np.loadtxt(bh_file_path, skiprows=14, dtype=np.float64)
     except FileNotFoundError:
          raise FileNotFoundError(f"Black hole position file not found: {bh_file_path}")
     except Exception as e:
@@ -1190,12 +1254,11 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
     NOTE: For SXS simulations, run the included h5_to_ascii.py to convert the .h5 data into this format""")
 
-    merge_time = bh_data[0, 0]
-    bh_data = bh_data[1:]  # Remove the dummy row that only contains the merge time
+    merge_idx_bh = np.argmax(np.diff(bh_data[:, 1])) + 1 # Find index where BH mass jumps as index of merge point
+    merge_time = bh_data[merge_idx_bh, 0]
 
-    # Find merge index robustly in the BH time array
+    # Extract BH time array
     bh_time = bh_data[:, 0]
-    merge_idx_bh = idx_time(bh_time, merge_time) # Find closest index in BH time array
 
     # Mass ratio calculation using slice object up to merger
     pre_merge = slice(None, merge_idx_bh)
@@ -1262,7 +1325,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # --- Extract critical strain values and zoom time ---
     try:
          # Pass the directory where converted files are expected
-         strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(psi4_output_dir, ext_rad)
+         strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(psi4_output_dir, ext_rad, ell_min, ell_max)
     except FileNotFoundError as e:
          raise FileNotFoundError(f"Cannot calculate max strain/zoom time: {e}. Ensure strain files exist.")
     except Exception as e:
@@ -1321,7 +1384,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         )
 
     # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
-    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data).real
+    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max).real
     lerp_times = generate_interpolation_points(equal_times, radius_values, ext_rad)
 
     strain_to_mesh = compute_strain_to_mesh(
@@ -1428,7 +1491,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # --- Animation Loop ---
     # Use @mlab.animate decorator for potential interactive use,
     # but run it directly for offscreen rendering.
-    @mlab.animate(delay=10, ui=True)
+    #@mlab.animate(delay=10, ui=True)
     def anim():
         """Generator function to drive the animation frame by frame."""
         current_percent = 0
@@ -1485,7 +1548,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             except Exception as e:
                  print(f"\nError saving frame {frame_filenames[idx]}: {e}")
 
-            yield # Yield control for the @mlab.animate decorator (if used interactively)
+            # yield # Yield control for the @mlab.animate decorator (if used interactively)
 
         # --- End of Loop ---
         mlab.close(all=True) # Close the Mayavi figure/engine
