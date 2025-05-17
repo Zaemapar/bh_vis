@@ -23,6 +23,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import curve_fit
 
+STRAIN_FILE_FMT = "Rh" # Program adds "l{ext}-{ext_rad}" for each mode
+SEC_TIME_DERIV_FMT = "Rh_2nd_time_deriv" # Program adds "l{ext}-{ext_rad}" for each mode
 
 def psi4_ffi_to_strain(
     data_dir: str,  # changeable in animation_main.py
@@ -106,8 +108,8 @@ def psi4_ffi_to_strain(
         arrays_to_txt(labels, ell2em2_wave, filename, output_dir)
 
         for ell in range(ell_min, ell_max + 1):
-            strain_filename = f"Rpsi4_r{ext_rad:06.1f}_l{ell}_conv_to_strain.txt"
-            ddot_filename = f"Rpsi4_r{ext_rad:06.1f}_l{ell}_from_strain.txt"
+            strain_filename = STRAIN_FILE_FMT + f"_l{ell}-r{ext_rad:06.1f}.txt"
+            ddot_filename = SEC_TIME_DERIV_FMT + f"_l{ell}-r{ext_rad:06.1f}.txt"
             labels = []
             strain_cols = []
             ddot_cols = []
@@ -121,14 +123,9 @@ def psi4_ffi_to_strain(
                 mode_data = strain_modes[modes_index(ell, em)]
                 ddot_data = strain_modes_ddot[modes_index(ell, em)]
 
-                labels.append(f"# column {col}: Re(h_{{l={ell},m={em}}}) * R_ext")
-                strain_cols.append(mode_data.real)
-                ddot_cols.append(ddot_data.real)
-                col += 1
-
-                labels.append(f"# column {col}: Im(h_{{l={ell},m={em}}}) * R_ext")
-                strain_cols.append(mode_data.imag)
-                ddot_cols.append(ddot_data.imag)
+                labels.append(f"# column {col}: h_{{l={ell},m={em}}} * R_ext")
+                strain_cols.append(mode_data)
+                ddot_cols.append(ddot_data)
                 col += 1
 
             arrays_to_txt(labels, strain_cols, strain_filename, output_dir)
@@ -159,8 +156,16 @@ def read_psi4_dir(
     for ell in range(ell_min, ell_max + 1):
         filepath = find_file_for_l(data_dir, ell)
         with open(filepath, "r", encoding="utf-8") as file:
-            lines = [line for line in file.readlines() if not line.startswith("#")]
-        data = np.array([np.array(line.split(), dtype=np.float64) for line in lines])
+            lines = [line for line in file.readlines()]
+            headers = []
+            while True:
+                if lines[0].startswith('#'):
+                    headers.append(lines[0])
+                    lines.pop(0)
+                else:
+                    break
+            complex = len(headers) == 2 * ell + 2
+        data = np.array([np.array(line.split(), dtype=(np.complex128 if complex else np.float64)) for line in lines])
 
         # np.unique sorts by time, removing duplicates
         time_data, indicies = np.unique(data[:, 0], return_index=True)
@@ -173,11 +178,15 @@ def read_psi4_dir(
                 f"Inconsistent times for l={ell}. Expected {n_times}, got {len(time_data)}."
             )
 
-        real_idx = 1
-        for _ in range(2 * ell + 1):
-            psi4_modes_data.append(data[:, real_idx] + 1j * data[:, real_idx + 1])
-            real_idx += 2
-    return np.array(time_data), np.array(psi4_modes_data)
+        if data.shape[1] == 2 * ell + 2:
+            for idx in range(1, 2 * ell + 2):
+                psi4_modes_data.append(data[:, idx])
+        else:
+            real_idx = 1
+            for _ in range(2 * ell + 1):
+                psi4_modes_data.append(data[:, real_idx] + 1j * data[:, real_idx + 1])
+                real_idx += 2
+    return np.array(time_data.real), np.array(psi4_modes_data)
 
 
 def find_file_for_l(data_dir: str, ell: int) -> str:
@@ -252,7 +261,7 @@ def arrays_to_txt(
         with open(file_path, mode="w", encoding="utf-8") as file:
             file.write("".join([f"{label}\n" for label in labels]))
             for row in zip(*collection):
-                file.write(" ".join([f"{item:.15f}" for item in row]) + "\n")
+                file.write(" ".join([f"{item:.15e}" for item in row]) + "\n")
         print(f"File {filename} saved to {dir_path}")
     except IOError as e:
         raise IOError(f"Error saving data to file: {e}") from e
@@ -292,7 +301,7 @@ def second_time_derivative(
 ) -> NDArray[np.float64]:
     """
     Compute the second time derivative of the input data.
-    
+
     Uses the second-order finite difference method, with upwind/downwind stencils for the endpoints.
 
     :param time: A numpy array containing time values.
@@ -412,6 +421,8 @@ def quad_fit_intercept(
         )
     return float(np.fabs(c))
 
+def get_index_from_modes(ell: int, em: int, ell_min: int) -> int:
+    return ell**2 + ell - ell_min**2 + em
 
 if __name__ == "__main__":
     import doctest

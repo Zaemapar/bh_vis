@@ -706,7 +706,7 @@ def calculate_zoomout_time(data: NDArray[np.float64]) -> float:
     return zoom_time
 
 def extract_max_strain_and_zoomout_time(
-    dir_path: str,
+    mode_data: NDArray[np.complex128],
     r_ext: int,
     ell_min: int,
     ell_max: int
@@ -715,7 +715,7 @@ def extract_max_strain_and_zoomout_time(
     Calculate the overall maximum strain, the strain immediately after the burst,
     and the earliest zoomout time across all l,m modes in the input directory.
 
-    :param dir_path: The directory housing the converted strain data files (e.g., Rpsi4_r..._l..._conv_to_strain.txt).
+    :param dir_path: The directory housing the converted strain data files (e.g., Rpsi4_strain_r{ext_rad}_l{ell}.txt).
     :param r_ext: The radius of extraction of the data (used to construct filenames).
     :param ell_min: The minimum l to be used in the calculations
     :param ell_max: The maximum l to be used in the calculations
@@ -729,88 +729,46 @@ def extract_max_strain_and_zoomout_time(
     overall_strain_after_burst = float('-inf')
     min_zoomout_time = float('inf')
     overall_max_strain = float('-inf')
-    files_processed = 0
 
-    for l in range(ell_min, ell_max + 1):
-         # Construct filename safely
-        filename = f"Rpsi4_r{0 if r_ext < 1000 else ''}{r_ext}_l{l}_conv_to_strain.txt"
-        file_path = os.path.join(dir_path, filename)
+    time_col = mode_data[0, :].real
 
-        # Determine expected number of columns based on l
-        # Time + (Real + Imaginary for each m from -l to l) = 1 + 2*(2l+1) = 4l+3 columns
-        # usecols goes up to max_col index, so max_col should be 4l+2
-        max_col_idx = 4 * l + 2
-        cols_to_use = range(0, max_col_idx + 1) # Range includes 0, stops before max_col_idx + 1
+    # Iterate through valid m values for this l
+    for i in range(1, mode_data.shape[0]):
 
-        try:
-            # Load data, skipping header lines dynamically
-            # Header lines = 1 (comment) + (number of modes = 2l+1) * 2 (Re/Im lines)
-            num_skip_rows = 4*l+3
-            data_all = np.loadtxt(file_path, skiprows=num_skip_rows, usecols=cols_to_use)
-            files_processed += 1
-        except FileNotFoundError:
-            print(f"Warning: File not found {file_path}, skipping l={l}.")
-            continue
-        except ValueError as e:
-             # Catch errors if columns don't exist or data is malformed
-             print(f"Warning: Error loading {file_path}: {e}. Skipping l={l}.")
-             continue
-        except IndexError:
-             # This might occur if usecols exceeds actual columns due to bad file or wrong max_col calculation
-             print(f"Warning: Index error loading columns from {file_path}. Skipping l={l}.")
-             continue
+        # Get real and imaginary strain parts
+        real = mode_data[i, :].real
+        imag = mode_data[i, :].imag
+        magnitude = np.hypot(real, imag) # Efficient calculation of sqrt(real^2 + imag^2)
+        data_lm = np.column_stack((time_col, magnitude)) # Time and magnitude for this mode
 
-        time_col = data_all[:, 0]
+        # --- Process this l,m mode ---
+        max_strain_peaks = max_strain_values(data_lm)
+        if max_strain_peaks.size == 0:
+            continue # Skip if no peaks found
 
-        # Iterate through valid m values for this l
-        for m in range(-l, l + 1):
-            # Calculate column indices for real and imaginary parts
-            # Real part: col index 1 (time) + (m-(-l)) * 2 = 1 + 2*(m+l)
-            # Imaginary part: col index + 1
-            col_real = 2*l + 2*m + 1
-            col_imag = col_real + 1
+        data_local_max = local_max_iterative(max_strain_peaks)
+        if data_local_max.size == 0:
+            continue # Skip if iterative max is empty
 
-            # Ensure calculated indices are within the loaded data bounds
-            if col_imag >= data_all.shape[1]:
-                print(f"Warning: Calculated column index {col_imag} out of bounds for l={l}, m={m} in {file_path}. Skipping.")
-                continue
+        data_max_max = get_max_max(data_local_max)
+        if data_max_max.size == 0:
+            continue # Skip if final max is empty
 
-            real = data_all[:, col_real]
-            imag = data_all[:, col_imag]
-            magnitude = np.hypot(real, imag) # Efficient calculation of sqrt(real^2 + imag^2)
-            data_lm = np.column_stack((time_col, magnitude)) # Time and magnitude for this mode
+        # Calculate zoomout time for this mode
+        zt = calculate_zoomout_time(data_max_max)
 
-            # --- Process this l,m mode ---
-            max_strain_peaks = max_strain_values(data_lm)
-            if max_strain_peaks.size == 0:
-                continue # Skip if no peaks found
+        # Calculate strain after burst for this mode
+        # Burst ends at the first peak found by local_max_iterative
+        end_burst_val = data_local_max[0, 2]
+        sab = get_strain_after_burst(max_strain_peaks, end_burst_val)
 
-            data_local_max = local_max_iterative(max_strain_peaks)
-            if data_local_max.size == 0:
-                 continue # Skip if iterative max is empty
+        # Find the max strain value from the most reduced set for this mode
+        mode_max_strain = np.max(data_max_max[:, 2]) if data_max_max.size > 0 else float('-inf')
 
-            data_max_max = get_max_max(data_local_max)
-            if data_max_max.size == 0:
-                continue # Skip if final max is empty
-
-            # Calculate zoomout time for this mode
-            zt = calculate_zoomout_time(data_max_max)
-
-            # Calculate strain after burst for this mode
-            # Burst ends at the first peak found by local_max_iterative
-            end_burst_val = data_local_max[0, 2]
-            sab = get_strain_after_burst(max_strain_peaks, end_burst_val)
-
-            # Find the max strain value from the most reduced set for this mode
-            mode_max_strain = np.max(data_max_max[:, 2]) if data_max_max.size > 0 else float('-inf')
-
-            # Update overall values
-            overall_strain_after_burst = max(overall_strain_after_burst, sab)
-            min_zoomout_time = min(min_zoomout_time, zt)
-            overall_max_strain = max(overall_max_strain, mode_max_strain)
-
-    if files_processed == 0:
-         raise FileNotFoundError(f"No valid strain files found in directory {dir_path} for l={ell_min} to {ell_max}.")
+        # Update overall values
+        overall_strain_after_burst = max(overall_strain_after_burst, sab)
+        min_zoomout_time = min(min_zoomout_time, zt)
+        overall_max_strain = max(overall_max_strain, mode_max_strain)
 
     # Handle cases where no valid peaks/times were found
     if overall_strain_after_burst == float('-inf'): overall_strain_after_burst = 0.0
@@ -1029,7 +987,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             bh_dir = str(sys.argv[1])
 
             # Set psi4_output_dir relative to bh_dir
-            psi4_output_dir = os.path.join(bh_dir, "converted_strain")
+            psi4_output_dir = os.path.join(bh_dir, "strain")
             movie_dir = os.path.join(bh_dir, "movies")  # Optimized path construction
 
             # Handle optional symlog argument
@@ -1106,7 +1064,20 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
     # --- Extraction Radius Calculations ---
     bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
-    bh_files = [f for f in bh_file_list if os.path.isfile(os.path.join(bh_dir, f))] # List the names of these files
+    psi4_dir = os.path.join(bh_dir, "psi4")
+    strain_dir = os.path.join(bh_dir, "strain")
+    strain_exists = os.path.isdir(strain_dir)
+    if strain_exists: # If strain data is provided, use file names from that one
+        file_list = os.listdir(strain_dir)
+        data_dir = strain_dir
+    elif os.path.isdir(psi4_dir): # If psi 4 data is provided, use file names from that one
+        file_list = os.listdir(psi4_dir)
+        data_dir = psi4_dir
+    else:
+        # Throw an error if no data is provided
+        raise FileNotFoundError(f"No psi4 or strain data found in the directory {bh_dir}")
+
+    bh_files = [f for f in file_list if os.path.isfile(os.path.join(data_dir, f))] # List the names of these files
 
     extraction_radii = np.empty(0)
     for b in bh_files:
@@ -1123,7 +1094,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         ext_rad = extraction_radii[0] # If only one extraction radius is found, use that one
     elif size == 0:
         # If no extraction radii are found, the files are probably incorrectly named
-        raise RuntimeError("No psi 4 files found in the directory. Ensure psi 4 files are formatted as such: Rpsi4_l#-r####.#")
+        raise RuntimeError("No extraction radii found. Ensure files are formatted as such: {filename}_l#-r####.#")
     elif size > 1:
         # Handle the case where multiple extraction radii are found
         print("Warning: Multiple extraction radii found in the directory.")
@@ -1142,7 +1113,8 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             except ValueError:
                 print("Please enter a float from 0.0 to 9999.0.") # Handle the case where something else was entered
         ext_rad = radius_extraction
-    print(f"Using extraction radius {ext_rad} for psi 4 data")
+
+    print(f"Using extraction radius {ext_rad} for {'strain' if strain_exists else 'psi_4'} data")
 
     # --- Minimum and Maximum Ell Mode Calculations ---
     ells = np.empty(0)
@@ -1153,7 +1125,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         if b[-10:-4] == str_ext_rad:
             # Attempt to convert the part of the file name that is supposed to be the mode into an integer
             try:
-                ell = float(b[7])
+                ell = float(b[-13])
             except ValueError:
                 continue # Skip over files that fail or don't have a mode
             if ell not in ells:
@@ -1162,7 +1134,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     ells = np.sort(ells.astype(int)) # Put the ell modes in order
     if len(ells) == 0:
         # If no modes are found, the files are probably incorrectly named
-        raise RuntimeError("No psi 4 files found in the directory. Ensure psi 4 files are formatted as such: Rpsi4_l#-r####.#")
+        raise RuntimeError("No l modes found. Ensure files are formatted as such: {filename}_l#-r####.#")
     # Extract the min and max ells
     ell_min = ells[0]
     ell_max = ells[-1]
@@ -1174,7 +1146,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     if gaps[0].size > 0:
         raise RuntimeError(f"A gap was detected in the l modes: Minimum l is {ell_min}, maximum l is {ell_max}, but no l={gaps[0][0] + ell_min + 1} file was found")
 
-    print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for psi 4 data")
+    print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for {'strain' if strain_exists else 'psi_4'} data")
 
     # --- Simulation & Visualization Parameters ---
     display_radius = 300  # radius for the mesh visualization
@@ -1209,19 +1181,67 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     Converting psi4 data to strain..."""
         )
 
-    # Convert psi4 to strain and load strain data
-    try:
-        # Pass the directory where the strain files are expected
-        time_array, mode_data = psi4strain.psi4_ffi_to_strain(bh_dir, psi4_output_dir, ell_max, ext_rad)
-    except FileNotFoundError as e:
-         raise FileNotFoundError(f"Error loading strain data: {e}. Ensure converted files exist in {psi4_output_dir} or check psi4strain function.")
-    except Exception as e:
-         raise RuntimeError(f"An unexpected error occurred during psi4 data conversion and strain loading: {e}")
+    if strain_exists:
+        print(f"Using existing strain data files in {strain_dir}")
+        mode_data = None
+        time_array_set = False
+        mode_data_set = False
+
+        files_processed = 0
+        for l in range(ell_min, ell_max + 1):
+            # Construct filename safely
+            filename = psi4strain.STRAIN_FILE_FMT + f"_l{l}-r{0 if ext_rad < 1000 else ''}{ext_rad}.txt"
+            file_path = os.path.join(psi4_output_dir, filename)
+
+            # Determine expected number of columns based on l
+            # Time + each m from -l to l = 1 + (2l+1) = 2l+2 columns
+            # usecols goes up to max_col index, so max_col should be 2l+1
+            max_col_idx = 2 * l + 1
+            cols_to_use = range(0, max_col_idx + 1) # Range includes 0, stops before max_col_idx + 1
+
+            try:
+                # Load data, skipping header lines dynamically
+                # Header lines = 1 (time) + (number of modes = 2l+1)
+                num_skip_rows = 2*l + 2
+                data_all = np.loadtxt(file_path, dtype=np.complex128, skiprows=num_skip_rows, usecols=cols_to_use)
+                files_processed += 1
+            except FileNotFoundError:
+                print(f"Warning: File not found {file_path}, skipping l={l}.")
+                continue
+            except ValueError as e:
+                # Catch errors if columns don't exist or data is malformed
+                print(f"Warning: Error loading {file_path}: {e}. Skipping l={l}.")
+                continue
+            except IndexError:
+                # This might occur if usecols exceeds actual columns due to bad file or wrong max_col calculation
+                print(f"Warning: Index error loading columns from {file_path}. Skipping l={l}.")
+                continue
+
+            if not time_array_set:
+                time_array = data_all[:, 0].real
+                time_array_set = True
+            if not mode_data_set:
+                mode_data = np.empty((0, len(time_array)))
+                mode_data_set = True
+
+            mode_data = np.vstack((mode_data, data_all[:, 1:].T))
+
+        if files_processed == 0:
+            raise FileNotFoundError(f"No valid strain files found in directory {psi4_output_dir} for l={ell_min} to {ell_max}.")
+
+    else:
+        # Convert psi4 to strain and load strain data
+        try:
+            # Pass the directory where the strain files are expected
+            time_array, mode_data = psi4strain.psi4_ffi_to_strain(psi4_dir, psi4_output_dir, ell_max, ext_rad)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Error loading strain data: {e}. Ensure converted files exist in {psi4_output_dir} or check psi4strain function.")
+        except Exception as e:
+            raise RuntimeError(f"An unexpected error occurred during psi4 data conversion and strain loading: {e}")
 
     n_times = len(time_array)
     if n_times == 0:
-        raise ValueError("Loaded time array is empty. Cannot proceed.")
-
+        raise ValueError(f"Loaded time array is empty. Cannot proceed.")
     n_frames = int(n_times / save_rate)
     print(f"Loaded {mode_data.shape[0]} modes over {n_times} time steps.")
 
@@ -1325,7 +1345,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # --- Extract critical strain values and zoom time ---
     try:
          # Pass the directory where converted files are expected
-         strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(psi4_output_dir, ext_rad, ell_min, ell_max)
+         strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(mode_data, ext_rad, ell_min, ell_max)
     except FileNotFoundError as e:
          raise FileNotFoundError(f"Cannot calculate max strain/zoom time: {e}. Ensure strain files exist.")
     except Exception as e:
@@ -1481,7 +1501,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     print(f"Timing Report (seconds):")
     print(f"  Parameter & Movie Setup: {time1 - time0:.3f}")
     print(f"  Grid Init: {time2 - time1:.3f}")
-    print(f"  Psi 4 Conversion & Strain Load: {time3 - time2:.3f}")
+    print(f"  Psi 4 Conversion/Strain Load: {time3 - time2:.3f}")
     print(f"  BH Trajectories: {time4 - time3:.3f}")
     print(f"  Cosmetic Calcs: {time5 - time4:.3f}")
     print(f"  Mesh Construction: {time6 - time5:.3f}")
@@ -1563,6 +1583,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         try:
             convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
             print(f"Movie saved to {movie_file_path}/{movie_dir_name}.mp4")
+            sys.exit(0)
         except Exception as e:
              print(f"\nError creating movie from frames: {e}")
              print("You may need to run ffmpeg manually:")
