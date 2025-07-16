@@ -15,6 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import interp1d
 from scipy.special import erf  # Vectorized error function for arrays
+from scipy.integrate import quad
 import quaternionic
 import spherical
 import imageio.v2 as imageio
@@ -27,6 +28,7 @@ from mayavi.sources.parametric_surface import ParametricSurface
 from mayavi.modules.surface import Surface
 from mayavi.modules.scalar_cut_plane import ScalarCutPlane
 import psi4_FFI_to_strain as psi4strain
+import random
 
 # Default parameters used when USE_SYS_ARGS is False
 BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
@@ -35,6 +37,12 @@ S_MODE = -2
 EXT_RAD = 100 # changeable with sys arguments
 USE_SYS_ARGS = True # Change to turn on/off default parameters
 STATUS_MESSAGES = True # Change to turn on/off status reports during rendering
+
+def plot(dataset: NDArray[Tuple]) -> None:
+    colors_list = list(mcolors.CSS4_COLORS.keys())
+    for data in dataset:
+        plt.plot(data[0], data[1], color=colors_list[random.choice(colors_list)])
+    plt.show()
 
 def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128], ell_min: int, ell_max: int) -> NDArray[np.complex128]:
     """
@@ -68,41 +76,6 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDA
     # Pairwise multiply and sum over modes: the result has shape (n_pts, n_times).
     pairwise_product = mode_data[:, np.newaxis, :] * swsh_arr[:, :, np.newaxis]
     return np.sum(pairwise_product, axis=0)
-
-def generate_interpolation_points(
-    time_array: NDArray[np.float64],
-    radius_values: NDArray[np.float64],
-    r_ext: float,
-) -> NDArray[np.float64]:
-    """
-    Fill out a 2D array of adjusted time values for the wave strain to be
-    linearly interpolated to. First index of the result represents the radial
-    distance index, and the second index represents the simulation time index (aka which mesh).
-
-    :param time_array: Numpy array of strain time indices.
-    :param radius_values: Numpy array of the radial points on the mesh.
-    :param r_ext: Extraction radius of the original data.
-    :return: A 2D numpy array (n_radius, n_times) of time values.
-
-    DocTests:
-    >>> time_array = np.array([0.0, 1.0, 2.0, 3.0])
-    >>> radius_values = np.array([10.0, 20.0])
-    >>> r_ext = 5.0
-    >>> generate_interpolation_points(time_array, radius_values, r_ext)
-    array([[0., 0., 0., 0.],
-           [0., 0., 0., 0.]])
-    """
-
-    # Precompute min and max of time_array
-    time_min, time_max = time_array.min(), time_array.max()
-
-    # Use broadcasting directly in the computation
-    target_times = time_array[np.newaxis, :] - radius_values[:, np.newaxis] + r_ext
-
-    # Clip the values in-place
-    np.clip(target_times, time_min, time_max, out=target_times)
-
-    return target_times
 
 def interpolate_coords_by_time(
     old_times: NDArray[np.float64],
@@ -208,6 +181,8 @@ def create_gw(
     :param color: Color of the strain as an RGB tuple (0, 0, 0) to (1, 1, 1).
     :param display_radius: Controls the visible radius for wireframe contours.
     :param wireframe: Whether to display the strain as a wireframe with contours.
+
+    DocTests: Requires a running Mayavi engine, difficult to test standalone. Will be skipped.
     """
 
     # Get the current scene efficiently
@@ -285,30 +260,6 @@ def create_sphere(
 
     return s
 
-def change_object_position(obj: Surface, position: tuple[float, float, float]) -> None:
-    """
-    Change the Cartesian position of a Mayavi surface to the given coordinates.
-
-    :param obj: Mayavi Surface object to reposition
-    :param position: New (x, y, z) position as a tuple of floats
-
-    DocTests: Requires a Mayavi Surface object, difficult to test standalone. Will be skipped.
-    """
-
-    obj.actor.actor.position = position  # Direct tuple assignment (no numpy conversion needed)
-
-def rescale_object(obj: Surface, size: float) -> None:
-    """
-    Rescale a Mayavi surface equally in all directions by a given factor.
-
-    :param obj: Mayavi Surface object to reposition
-    :param size: Scale factor to multiply dimensions by
-
-    DocTests: Requires a Mayavi Surface object, difficult to test standalone. Will be skipped.
-    """
-
-    obj.actor.actor.scale = (size, size, size)  # Direct tuple assignment (no numpy conversion needed)
-
 def dhms_time(seconds: float) -> str:
     """
     Convert a given number of seconds into a string indicating the remaining time.
@@ -318,19 +269,19 @@ def dhms_time(seconds: float) -> str:
 
     DocTests:
     >>> dhms_time(90061)
-    '1 days 1 hours 1 minutes'
-    >>> dhms_time(3600)
-    '1 hours'
+    '1 day 1 hour 1 minute'
+    >>> dhms_time(7200)
+    '2 hours'
     >>> dhms_time(59)
     ''
     >>> dhms_time(3665)
-    '1 hours 1 minutes'
+    '1 hour 1 minute'
     """
 
     divisors = (
-        (86400, "days"),
-        (3600, "hours"),
-        (60, "minutes"),
+        (86400, "day"),
+        (3600, "hour"),
+        (60, "minute"),
     )
     parts = []
     remaining = seconds
@@ -338,7 +289,7 @@ def dhms_time(seconds: float) -> str:
         value = int(remaining // divisor)
         remaining = remaining % divisor
         if value > 0:
-            parts.append(f"{value} {label}")
+            parts.append(f"{value} {label}{'s' if value != 1 else ''}")
     return " ".join(parts)
 
 def convert_to_movie(input_path: str, movie_name: str, fps: int = 24, status_messages: bool = True) -> None:
@@ -403,381 +354,6 @@ def convert_to_movie(input_path: str, movie_name: str, fps: int = 24, status_mes
         if status_messages:
             print("\rProgress: 100.0% completed", flush=True) # Ensure 100% is shown
 
-def max_strain_values(data: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Identify peak strain values where increasing/decreasing trends change.
-
-    :param data: Numpy 2D array of strain values with column 0 as time and column 1 as strain magnitude.
-    :return: Numpy 2D array of local maxima in data with column 0 as the value's index in the original data,
-             column 1 as the time, and column 2 as the absolute max strain value.
-
-    DocTests:
-    >>> data = np.array([[0., 0.], [1., 5.], [2., 3.], [3., 4.], [4., 2.], [5., 6.]])
-    >>> max_strain_values(data)
-    array([[1., 1., 5.],
-           [3., 3., 4.],
-           [5., 5., 6.]])
-    >>> data_flat = np.array([[0., 2.], [1., 2.], [2., 2.]])
-    >>> max_strain_values(data_flat)
-    array([[2., 2., 2.]])
-    >>> data_decreasing = np.array([[0., 5.], [1., 4.], [2., 3.]])
-    >>> max_strain_values(data_decreasing)
-    array([[0., 0., 5.]])
-    """
-    if data.shape[0] < 2:
-        if data.shape[0] == 1:
-             # Return the single point if only one exists
-             return np.array([[0., data[0, 0], np.abs(data[0, 1])]])
-        else:
-             return np.empty((0, 3)) # Return empty if no data
-
-    strain_vals = data[:, 1]
-    times = data[:, 0]
-    peaks = []
-
-    prev_val = strain_vals[0]
-    # Start by assuming it's increasing from negative infinity or flat
-    increasing = True if strain_vals.shape[0] <= 1 or strain_vals[1] >= strain_vals[0] else False
-
-    # Add the first point if it's a peak relative to the start
-    if not increasing:
-         peaks.append((0, times[0], abs(prev_val)))
-
-    for t in range(1, len(strain_vals)):
-        current_val = strain_vals[t]
-
-        if increasing:
-            if current_val < prev_val:  # Peak detected (transition from increasing to decreasing)
-                peaks.append((t-1, times[t-1], abs(prev_val)))
-                increasing = False
-        else: # Was decreasing
-            if current_val > prev_val: # Valley detected (transition from decreasing to increasing)
-                increasing = True
-            elif current_val == prev_val: # Plateau after decrease - consider previous point the peak
-                 pass # Don't add the current point as a peak yet
-
-        prev_val = current_val
-
-    # Add the last point if the trend was increasing towards the end
-    if increasing:
-        peaks.append((len(strain_vals)-1, times[-1], abs(strain_vals[-1])))
-
-    return np.array(peaks)
-
-def get_local_maxima(data: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Identify local maxima in already peak-detected strain data.
-
-    Assumes input data contains points representing peaks from `max_strain_values`.
-
-    :param data: Numpy 2D array of local maxima strain values with column 0 as the original index,
-             column 1 as the time, and column 2 as the absolute strain value.
-    :return: Numpy 2D array of local maxima among the input peaks, with the same column structure.
-             Returns empty if input has < 3 points.
-
-    DocTests:
-    >>> peaks = np.array([[1., 1., 5.], [3., 3., 4.], [5., 5., 6.]])
-    >>> get_local_maxima(peaks)
-    array([[1., 1., 5.],
-           [5., 5., 6.]])
-    >>> peaks_single = np.array([[1., 1., 5.]])
-    >>> get_local_maxima(peaks_single)
-    array([], shape=(0, 3), dtype=float64)
-    >>> peaks_two = np.array([[1., 1., 5.], [3., 3., 4.]])
-    >>> get_local_maxima(peaks_two)
-    array([], shape=(0, 3), dtype=float64)
-    >>> peaks_three = np.array([[1., 1., 5.], [3., 3., 4.], [5., 5., 3.]])
-    >>> get_local_maxima(peaks_three)
-    array([[1., 1., 5.]])
-    """
-    if data.shape[0] < 3:
-        return np.empty((0, 3), dtype=np.float64) # Need at least 3 points for a local maximum
-
-    orig_indices = data[:, 0]
-    time_col = data[:, 1]
-    values = data[:, 2]
-    local_max = []
-
-    # Check the first point
-    if values[0] >= values[1]:
-        local_max.append([orig_indices[0], time_col[0], values[0]])
-
-    # Check intermediate points
-    for t in range(1, len(values) - 1):
-        if values[t] >= values[t-1] and values[t] >= values[t+1]:
-            # Add only if it's strictly greater than one neighbor or equal to both
-            if values[t] > values[t-1] or values[t] > values[t+1] or (values[t] == values[t-1] and values[t] == values[t+1]):
-                 local_max.append([orig_indices[t], time_col[t], values[t]])
-
-    # Check the last point
-    if values[-1] >= values[-2]:
-        local_max.append([orig_indices[-1], time_col[-1], values[-1]])
-
-    # Remove duplicates if plateaus caused multiple entries for the same peak time/value
-    if local_max:
-        unique_max = np.unique(np.array(local_max, dtype=np.float64), axis=0)
-        return unique_max
-    else:
-        return np.empty((0, 3), dtype=np.float64)
-
-def local_max_iterative(data: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Iteratively find local maxima of data until doing so further would reduce
-    the size of the dataset by more than half.
-
-    :param data: Numpy 2D array of local maxima strain values (output from `max_strain_values` or previous iteration)
-                 with column 0 as the original index, column 1 as the time, and column 2 as the strain value.
-    :return: Numpy 2D array of strain values found by iterating searches for local maxima, with the same column structure.
-    Maximizing the data beyond this
-    point might cause significant reductions in the information.
-
-    DocTests:
-    >>> data = np.array([
-    ... [1, 1, 5], [3, 3, 4], [5, 5, 6], [7, 7, 5], [9, 9, 7],
-    ... [11, 11, 6], [13, 13, 8], [15, 15, 7]
-    ... ])
-    >>> local_max_iterative(data) # First iter: [1,5,9,13]; Second iter: [1,9,13]. 2*3 > 4 is True. Return iter1.
-    array([[ 1.,  1.,  5.],
-           [ 5.,  5.,  6.],
-           [ 9.,  9.,  7.],
-           [13., 13.,  8.]])
-    """
-
-    current = data
-    if current.shape[0] < 3: # Cannot find local maxima with less than 3 points
-        return current
-
-    while True:
-        max_data = get_local_maxima(current)
-        if max_data.shape[0] < 3: # Cannot iterate further
-            return current # Return the previous iteration's result
-
-        max_max_data = get_local_maxima(max_data)
-
-        # Stop if the next iteration significantly reduces data points
-        if 2 * max_max_data.shape[0] > max_data.shape[0] or max_max_data.shape[0] < 3:
-            # If max_data has few points, max_max_data might be empty or too small,
-            # leading to 0 > N (false) or small_num > N (false).
-            # The condition max_max_data.shape[0] < 3 handles this edge case.
-            # We return max_data because applying get_local_maxima again (to get max_max_data)
-            # reduced the size too much according to the 2* criterion OR resulted in too few points.
-             return max_data
-        else:
-             current = max_data # Continue iteration
-
-def get_max_max(data: NDArray[np.float64]) -> NDArray[np.float64]:
-    """
-    Iteratively find local maxima of data until doing so
-    further would reduce the size of the dataset to 4 or fewer points.
-
-    :param data: Numpy 2D array of local maxima strain values (output from `max_strain_values` or previous iteration)
-                 with column 0 as the original index, column 1 as the time, and column 2 as the strain value.
-    :return: Numpy 2D array of strain values found by iterating searches for local maxima, with the same column structure.
-    Maximizing the data beyond this
-    point might cause a loss of information rendering the data less reliable for certain analyses.
-
-    DocTests:
-    >>> data = np.array([
-    ... [1, 1, 5], [3, 3, 4], [5, 5, 6], [7, 7, 5], [9, 9, 7],
-    ... [11, 11, 6], [13, 13, 8], [15, 15, 7], [17, 17, 9], [19, 19, 8]
-    ... ]) # Iter1: [1,5,9,13,17]; Iter2: [1,9,17]. Shape is 3 <= 4. Stop.
-    >>> get_max_max(data)
-    array([[ 1.,  1.,  5.],
-           [ 5.,  5.,  6.],
-           [ 9.,  9.,  7.],
-           [13., 13.,  8.],
-           [17., 17.,  9.]])
-    """
-
-    current = data
-    if current.shape[0] <= 4: # Return immediately if already small
-         return current
-
-    while True:
-        next_max = get_local_maxima(current)
-        if next_max.shape[0] <= 4 or next_max.shape[0] == current.shape[0]:
-            # Stop if size is small enough or if no reduction occurred
-            # (could happen with flat peaks)
-            break
-        current = next_max
-    return current
-
-def get_strain_after_burst(data: NDArray[np.float64], end_of_burst_value: float) -> float:
-    """
-    Get the strain value in the peak data immediately after the radiation burst has ended.
-
-    Finds the first peak *after* the peak identified as the end of the burst.
-
-    :param data: Numpy 2D array of local maxima strain values (output of `max_strain_values`)
-                 with column 0 as original index, column 1 as time, and column 2 as absolute strain value.
-    :param end_of_burst_value: The absolute value of the strain at the designated end of the radiation burst
-                               (must exist in data[:, 2]).
-    :return: The absolute strain value of the first peak immediately following the end_of_burst_value peak.
-             Returns 0 if no such peak exists or data is too small.
-
-    DocTests:
-    >>> data = np.array([[1., 1., 5.], [3., 3., 4.], [5., 5., 6.], [7., 7., 3.], [9., 9., 2.]])
-    >>> get_strain_after_burst(data, 6.0) # Burst ends at peak value 6.0, next peak is 3.0
-    3.0
-    >>> get_strain_after_burst(data, 3.0) # Burst ends at peak value 3.0, next peak is 2.0
-    2.0
-    >>> get_strain_after_burst(data, 2.0) # Burst ends at last peak, no peak after
-    0.0
-    >>> data_short = np.array([[1., 1., 5.], [3., 3., 4.]])
-    >>> get_strain_after_burst(data_short, 5.0) # Returns the next value even if only two points
-    4.0
-    >>> get_strain_after_burst(data_short, 4.0)
-    0.0
-    """
-
-    if data.shape[0] < 2: # Need at least two points to find one after another
-        return 0.0
-    try:
-        # Find the index of the row where the strain value matches end_of_burst_value
-        end_of_burst_indices = np.where(data[:, 2] == end_of_burst_value)[0]
-        if end_of_burst_indices.size == 0:
-             print(f"Warning: end_of_burst_value {end_of_burst_value} not found in data.")
-             return 0.0
-        end_of_burst_index = end_of_burst_indices[0] # Use the first occurrence if multiple
-
-        # Check if this is the last point in the array
-        if end_of_burst_index >= data.shape[0] - 1:
-            return 0.0 # No points after the burst end
-
-        # Return the strain value of the next point
-        return data[end_of_burst_index + 1, 2]
-
-    except IndexError:
-         # Should not happen with the checks above, but for safety
-         print("Warning: Index error occurred in get_strain_after_burst.")
-         return 0.0
-
-def calculate_zoomout_time(data: NDArray[np.float64]) -> float:
-    """
-    Calculate the time the visualization should start zooming out based on major peaks.
-
-    Finds the two largest peaks in the iteratively-maximized data and calculates
-    a time point shortly after the second largest peak, weighted towards the largest.
-
-    :param data: Numpy 2D array of iteratively maximized local maxima strain values
-                 (output from `get_max_max` or `local_max_iterative`) with column 0 as original index,
-                 column 1 as time, and column 2 as the strain value.
-    :return: The time at which to begin zooming out in the visualization. Returns infinity if fewer than 2 peaks are found.
-
-    DocTests:
-    >>> data = np.array([[1, 1, 5.], [9, 9, 7.], [17, 17, 9.]]) # Peaks at t=1,9,17; vals=5,7,9
-    >>> calculate_zoomout_time(data) # max1=(17,9), max2=(9,7). time = 9 + (17+9)/4 = 9 + 6.5 = 15.5
-    15.5
-    >>> data_two_peaks = np.array([[1, 1, 5.], [9, 9, 7.]])
-    >>> calculate_zoomout_time(data_two_peaks) # max1=(9,7), max2=(1,5). time = 1 + (9+1)/4 = 1 + 2.5 = 3.5
-    3.5
-    >>> data_one_peak = np.array([[1, 1, 5.]])
-    >>> calculate_zoomout_time(data_one_peak)
-    inf
-    >>> data_empty = np.empty((0,3))
-    >>> calculate_zoomout_time(data_empty)
-    inf
-    """
-
-    values = data[:, 2]
-    times = data[:, 1] # Get the time column
-
-    if values.size < 2: # Need at least two peaks
-        return float('inf')
-
-    # Find the index and time of the largest peak (max1)
-    max1_idx = np.argmax(values)
-    max1_time = times[max1_idx]
-    max1_val = values[max1_idx]
-
-    # Find the index and time of the second largest peak (max2)
-    # Temporarily set max1 value to negative infinity to find the next max
-    temp_values = np.copy(values)
-    temp_values[max1_idx] = -np.inf
-    max2_idx = np.argmax(temp_values)
-    max2_time = times[max2_idx]
-    # max2_val = values[max2_idx] # We don't actually need the value
-
-    # Calculate zoomout time: Start at the time of the second peak,
-    # then add a quarter of the sum of the peak times.
-    # This biases the zoomout start towards the larger peak but ensures it happens after the second peak.
-    zoom_time = max2_time + (max1_time + max2_time) / 4
-
-    return zoom_time
-
-def extract_max_strain_and_zoomout_time(
-    mode_data: NDArray[np.complex128],
-    r_ext: int,
-    ell_min: int,
-    ell_max: int
-) -> Tuple[float, float, float]:
-    """
-    Calculate the overall maximum strain, the strain immediately after the burst,
-    and the earliest zoomout time across all l,m modes in the input directory.
-
-    :param dir_path: The directory housing the converted strain data files (e.g., Rpsi4_strain_r{ext_rad}_l{ell}.txt).
-    :param r_ext: The radius of extraction of the data (used to construct filenames).
-    :param ell_min: The minimum l to be used in the calculations
-    :param ell_max: The maximum l to be used in the calculations
-    :return: A tuple containing:
-             - The maximum strain value found immediately after the burst across all processed modes.
-             - The overall maximum strain value found in the iteratively maximized data across all processed modes.
-             - The minimum (earliest) zoomout time calculated across all processed modes.
-    :raises FileNotFoundError: If no valid strain files are found for the given l range.
-    """
-    # This function requires reading specific files. Cannot be tested with doctest without mocking/setup.
-    overall_strain_after_burst = float('-inf')
-    min_zoomout_time = float('inf')
-    overall_max_strain = float('-inf')
-
-    time_col = mode_data[0, :].real
-
-    # Iterate through valid m values for this l
-    for i in range(1, mode_data.shape[0]):
-
-        # Get real and imaginary strain parts
-        real = mode_data[i, :].real
-        imag = mode_data[i, :].imag
-        magnitude = np.hypot(real, imag) # Efficient calculation of sqrt(real^2 + imag^2)
-        data_lm = np.column_stack((time_col, magnitude)) # Time and magnitude for this mode
-
-        # --- Process this l,m mode ---
-        max_strain_peaks = max_strain_values(data_lm)
-        if max_strain_peaks.size == 0:
-            continue # Skip if no peaks found
-
-        data_local_max = local_max_iterative(max_strain_peaks)
-        if data_local_max.size == 0:
-            continue # Skip if iterative max is empty
-
-        data_max_max = get_max_max(data_local_max)
-        if data_max_max.size == 0:
-            continue # Skip if final max is empty
-
-        # Calculate zoomout time for this mode
-        zt = calculate_zoomout_time(data_max_max)
-
-        # Calculate strain after burst for this mode
-        # Burst ends at the first peak found by local_max_iterative
-        end_burst_val = data_local_max[0, 2]
-        sab = get_strain_after_burst(max_strain_peaks, end_burst_val)
-
-        # Find the max strain value from the most reduced set for this mode
-        mode_max_strain = np.max(data_max_max[:, 2]) if data_max_max.size > 0 else float('-inf')
-
-        # Update overall values
-        overall_strain_after_burst = max(overall_strain_after_burst, sab)
-        min_zoomout_time = min(min_zoomout_time, zt)
-        overall_max_strain = max(overall_max_strain, mode_max_strain)
-
-    # Handle cases where no valid peaks/times were found
-    if overall_strain_after_burst == float('-inf'): overall_strain_after_burst = 0.0
-    if overall_max_strain == float('-inf'): overall_max_strain = 0.0
-    # min_zoomout_time remains inf if never updated
-
-    return overall_strain_after_burst, overall_max_strain, min_zoomout_time
-
-
 def compute_strain_to_mesh(
     strain_azi: NDArray[np.float32],
     equal_times: NDArray[np.float32], # Not used directly, but lerp_times depends on it
@@ -788,7 +364,8 @@ def compute_strain_to_mesh(
     use_symlog: bool,
     status_messages=True
 ) -> NDArray[np.float32]:
-    """Interpolates strain data onto a polar mesh grid over specific time points.
+    """
+    Interpolates strain data onto a polar mesh grid over specific time points.
 
     This function takes precomputed strain data, originally defined over a set
     of time points (`time_array`) for various azimuths (`strain_azi`), and
@@ -822,41 +399,7 @@ def compute_strain_to_mesh(
     :param status_messages: If True, print progress messages and estimated chunk size.
     :return: A 3D array containing the interpolated strain values on the spatio-temporal mesh.
              Shape: (n_rad_pts, n_azi_pts, n_equal_times).
-
-    Doctests:
-    >>> # Setup parameters
-    >>> n_rad_pts = 2
-    >>> n_azi_pts = 3
-    >>> n_original_times = 4
-    >>> n_equal_times = 5
-    >>>
-    >>> # Setup dummy data
-    >>> strain_azi = np.arange(n_azi_pts * n_original_times, dtype=np.float32).reshape((n_azi_pts, n_original_times))
-    >>> # strain_azi = [[ 0.  1.  2.  3.], [ 4.  5.  6.  7.], [ 8.  9. 10. 11.]]
-    >>> equal_times = np.linspace(0.5, 2.5, n_equal_times, dtype=np.float32) # 0.5, 1., 1.5, 2., 2.5
-    >>> radius_values = np.array([10.0, 20.0], dtype=np.float32)
-    >>> lerp_times = np.vstack((np.linspace(0.5, 2.5, n_equal_times), # 0.5, 1.0, 1.5, 2.0, 2.5
-    ...                         np.linspace(0.2, 2.8, n_equal_times) # 0.2, 0.85, 1.5, 2.15, 2.8
-    ... ))
-    >>> time_array = np.arange(n_original_times, dtype=np.float32) # 0. 1. 2. 3.
-    >>> dropoff_2D_flat = np.array([1.0, 0.5], dtype=np.float32)
-    >>> # Run the function
-    >>> result = compute_strain_to_mesh(
-    ...     strain_azi, equal_times, radius_values, lerp_times,
-    ...     time_array, dropoff_2D_flat, False, False
-    ... )
-    >>>
-    >>> # Check shape
-    >>> result.shape
-    (2, 3, 5)
-    >>>
-    >>> # Check some values (calculated via np.interp manually)
-    >>> print(result[0, 0, :])
-    [0.5 1.  1.5 2.  2.5]
-    >>> print(result[1, 1, :])
-    [2.1   2.425 2.75  3.075 3.4  ]
-    >>> print(result[0, 2, :])
-    [ 8.5  9.   9.5 10.  10.5]
+    :throws RuntimeError: If the available memory reported by psutil is 0, the code cannot proceed.
     """
 
     # Get the size of each array
@@ -866,6 +409,8 @@ def compute_strain_to_mesh(
 
     # Estimate chunk size based on available memory (heuristic)
     chunk_size = min(int(psutil.virtual_memory().available / 70000000), n_azi_pts)
+    if chunk_size == 0:
+        raise RuntimeError("Not enough memory to begin mesh calculations. Reopen your terminal and try again.")
 
     if status_messages:
          print(f"Using chunk size: {chunk_size} for azimuth interpolation.")
@@ -876,26 +421,25 @@ def compute_strain_to_mesh(
         end_idx = min(start_idx + chunk_size, n_azi_pts)
 
         # Interpolate each azimuth in the current chunk
-        for i, azi_idx in enumerate(range(start_idx, end_idx)):
+        for azi_idx in range(start_idx, end_idx):
             # Use np.interp for each radial profile corresponding to this azimuth
             # The values to interpolate *from* are strain_azi[azi_idx, :] at times time_array
             # The points to interpolate *to* are the times given by lerp_times[:, time_idx] for each time_idx
             # Result shape for one azi_idx should be (n_rad_pts, n_equal_times)
             for rad_idx in range(n_rad_pts):
                 strain_to_mesh[rad_idx, azi_idx, :] = np.interp(
-                lerp_times[rad_idx, :],  # x-coordinates to interpolate to (shape n_rad, n_equal_times) -> flattens automatically
-                time_array, # Original x-coordinates (shape n_original_times)
-                # Original y-values (shape n_original_times) scaled with symlog (if enabled) and dropoff factors
-                dropoff_2D_flat[rad_idx] * (np.sign(strain_azi[azi_idx, :]) * np.log1p(np.abs(strain_azi[azi_idx, :])) if use_symlog else strain_azi[azi_idx, :]), 
-                left=np.nan, # Value for x < time_array[0]
-                right=np.nan # Value for x > time_array[-1]
+                    lerp_times[rad_idx, :], # Time coordinates to interpolate to
+                    time_array, # Original time coordinates (shape n_original_times)
+                    # Original strain values (shape n_original_times) scaled with symlog (if enabled) and dropoff factors
+                    dropoff_2D_flat[rad_idx] * (np.sign(strain_azi[azi_idx, :]) * np.log1p(np.abs(strain_azi[azi_idx, :])) if use_symlog else strain_azi[azi_idx, :])
                 )
+
             # Update status
             if status_messages:
                 # Calculate progress based on the outer loop index 'azi_idx'
                 progress = (azi_idx + 1) / (n_azi_pts) * 100
                 # Use f-string formatting
-                print(f"\rProgress: {int(progress)}% completed", end="", flush=True)
+                print(f"\rProgress: {progress:.1f}% completed", end="", flush=True)
 
     # Create a new line after status messages complete
     if status_messages:
@@ -903,48 +447,126 @@ def compute_strain_to_mesh(
 
     return strain_to_mesh
 
-def idx_time(array: NDArray[np.float64], time: float) -> int:
+def get_amplitude_scale_factor(swsh_array: NDArray[np.float64],
+                               azimuth_values: NDArray[np.float64],
+                               r_omitted: float,
+                               camera_dist_max: float,
+                               camera_elevation_max: float,
+                               camera_azi: float
+) -> float:
     """
-    Calculate the index at which the value of a sorted array is closest to the value `time`.
+    Calculates the factor by which the strain data should be scaled, based on limiting camera parameters and the
+    size of the hole generated in the mesh for the black holes. The method will calculate the amplitude scale factor
+    such that the peak of the gravitational waves, from the perspective of the camera, touch the edge of the hole in
+    the center of the mesh. This is to ensure that the maximum scaling for the strain is used for visual effect without
+    impeding the view of the black holes in the center. For more explanation on the algorithm used, visit the
+    GitHub documentation.
 
-    :param array: Numpy array of time values (assumed to be sorted).
-    :param time: Target time to search for in the array.
-    :return: The index of the element in `array` closest to `time`.
+    :param swsh_array: Array of strain over time at each azimuth angle. Shape: (n_azi, n_times)
+    :param azimuth_values: Array of azimuth values from 0 to 360. Shape: (n_azi)
+    :param r_omitted: Radius of the central hole in the mesh, calculated from black hole positions at start
+    :param camera_dist_max: Maximum distance the camera zooms out during the simulation
+    :param camera_elevation_max: Maximum elevation the camera achieves (minimum angle between it and the horizon)
+    :param camera_azi: Azimuth angle of the camera (fixed)l
+    :return: A float by which to scale the strain data for optimal waveform size
 
     DocTests:
-    >>> times = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
-    >>> idx_time(times, 2.1)
-    2
-    >>> idx_time(times, 1.9)
-    2
-    >>> idx_time(times, 3.0)
-    3
-    >>> idx_time(times, -1.0)
-    0
-    >>> idx_time(times, 5.0)
-    4
+    >>> swsh_array = np.array([[0.841470984808,0.917921410456,1.33501520964,-5.39406678297,9.23284682067],
+    ...                        [0.841470984808,1.00285846158,1.59350892505,-7.03426538413,13.1544351329],
+    ...                        [0.841470984808,0.959638368983,1.45911802242,-6.16343231814,11.0292008758]])
+    >>> azimuth_values = np.array([0, 0.1, 6.2])
+    >>> get_amplitude_scale_factor(swsh_array, azimuth_values, 5, 20, np.pi / 4, 0)
+    np.float64(0.5435312594361945)
     """
 
-    if array.size == 0:
-        raise ValueError("Input array cannot be empty.")
+    dropoff_radius = 1.875 * r_omitted # Point at which strain is cut off using erf, plus a little more due to curvature
 
-    # Find the index where `time` would be inserted to maintain order
-    insert_idx = np.searchsorted(array, time, side='left')
+    # Maximum distance from the camera to the center in the xy plane
+    xy_camera_dist = camera_dist_max * np.sin(camera_elevation_max)
 
-    # Handle edge cases: time is before the first element or after the last
-    if insert_idx == 0:
-        return 0
-    if insert_idx == len(array):
-        return len(array) - 1
+    # Coordinates (x, y) at which the camera viewline intersects a circle with the dropoff radius
+    x_viewline_intersects_dropoff = ((xy_camera_dist**2 / r_omitted) - np.sqrt(dropoff_radius**2 + (dropoff_radius * \
+                                    xy_camera_dist / r_omitted)**2 - xy_camera_dist**2)) / ((xy_camera_dist / \
+                                    r_omitted)**2 + 1)
+    y_viewline_intersects_dropoff = xy_camera_dist * (1 - (x_viewline_intersects_dropoff / r_omitted))
 
-    # Check which neighbor is closer: the one before or the one at insert_idx
-    left_neighbor_diff = time - array[insert_idx - 1]
-    right_neighbor_diff = array[insert_idx] - time
+    # Azimuth values that should be considered in amplitue scaling, consider only the ones where strain could impede view
+    azi_scan_bound = np.pi / 2 - np.arctan(y_viewline_intersects_dropoff / x_viewline_intersects_dropoff)
 
-    if left_neighbor_diff <= right_neighbor_diff:
-        return insert_idx - 1
-    else:
-        return insert_idx
+    # Camera view of the center hole is elliptic, calculate semimajor and semiminor axes lengths of this view
+    view_semiminor_axis = (camera_dist_max * y_viewline_intersects_dropoff * np.cos(camera_elevation_max)) / \
+                          xy_camera_dist - (camera_dist_max * np.cos(camera_elevation_max) * (dropoff_radius - \
+                          r_omitted)) / (xy_camera_dist - r_omitted)
+    view_semimajor_axis = r_omitted * (1 - y_viewline_intersects_dropoff / xy_camera_dist)
+
+    # Apply a mask for azimuth values, ensuring within the scan bound (special case for camera_azi = 0 or 2*pi
+    view_condit = (((azimuth_values > 2 * np.pi - azi_scan_bound) & (azimuth_values < 2 * np.pi)) | \
+                  ((azimuth_values >= 0) & (azimuth_values < azi_scan_bound))) if (camera_azi == 0 or camera_azi == 2 * \
+                  np.pi) else ((camera_azi - azi_scan_bound <= azimuth_values) & (azimuth_values < camera_azi + \
+                  azi_scan_bound))
+    valid_azi_idx = np.where(view_condit)
+
+    # A loop to calculate the minimum scale factor allowable across all azis (since the strain max is limiting)
+    min_scale_factor = float('inf')
+
+    for idx in valid_azi_idx[0]:
+        # Using the semimajor and semiminor axes, calculate a bound line that the waves cannot intersect and find its
+        # value at a certain azi
+        z_max_azi = camera_dist_max * y_viewline_intersects_dropoff * np.cos(camera_elevation_max) / xy_camera_dist - \
+                    view_semiminor_axis * np.sqrt(1 - (dropoff_radius * np.sin(azimuth_values[idx] - camera_azi) / \
+                    view_semimajor_axis)**2)
+
+        # Calculate a trial amplitude scale factor, based on the maximum strain over time along this azimuth
+        factor = z_max_azi / np.max(np.abs(swsh_array[idx, :]))
+
+        # If the factor is less than the minimum, it becomes the minimum
+        if factor < min_scale_factor:
+            min_scale_factor = factor
+
+    return min_scale_factor
+
+def find_idx(array: NDArray[np.float64], value: float) -> NDArray[np.int64]:
+    """
+    Finds all indexes where a value could be inserted into an array without causing a break in trends (increasing,
+    decreasing, constant).
+
+    :param array: The numpy array to search for the value's proper position(s) should it occur within trends
+    :value: The float value for whose place to search for
+    :return: A numpy array containing any indexes where value could be inserted into array without changing trends
+
+    DocTests:
+    >>> find_idx(np.array([5, 7, 5, 3, 2, 3]), 4)
+    array([0, 3, 5])
+    """
+
+    # Requires array to have a minimum size
+    if array.size <= 1:
+        raise ValueError("Input array must have more than 2 elements.")
+
+    idxs = []
+
+    # Tries to identify a trend at the start and, if the value comes before the start, would it match that trend
+    if value < array[0] and array[0] < array[1] or value > array[0] and array[0] > array[1] or value == array[0]:
+        idxs.append(0)
+
+    # Iterate through every element except the last
+    for i in range(len(array) - 1):
+        this = array[i]
+        next = array[i + 1]
+        if this == value:
+            idxs.append[i] # Append an index if the value perfectly matches
+
+        # If the value is between two other adjacent values, append that as well
+        elif this > value and next < value or this < value and next > value:
+            left_neighbor_diff = np.abs(value - array[i])
+            right_neighbor_diff = np.abs(value - array[i + 1])
+            idxs.append(i if left_neighbor_diff < right_neighbor_diff else i + 1)
+
+    # Tries to identify a trend at the end and, if the value comes after the end, would it match that trend
+    if value < array[-1] and array[-1] < array[-2] or value > array[-1] and array[-1] > array[-2] or value == array[-1]:
+        idxs.append(len(array) - 1)
+
+    return np.array(idxs)
 
 def main() -> None:
     """
@@ -964,27 +586,28 @@ def main() -> None:
     # psi4_to_strain.main() # Example: If psi4_to_strain module existed
 
     # Check initial parameters
-    time0 = time.time()
+    time0 = time.time() # Get the initial simulation time
     global BH_DIR, MOVIE_DIR, EXT_RAD # Allow modification of globals based on args
-    bh1_mass: float = 1.0 # Default mass
-    bh2_mass: float = 1.24 # Default mass ratio for GW150914
+    bh1_rel_mass: float = 1.0 # Default mass
+    bh2_rel_mass: float = 1.24 # Default mass ratio for GW150914
     use_symlog: bool = False # Default scale
- 
+
     if USE_SYS_ARGS:
         argc = len(sys.argv)
         if argc not in (2, 3):
             # Use raise RuntimeError for error exit
             raise RuntimeError(
-                f"""Usage: python {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]
-Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
-
-                Arguments:
-                  <path_to_data_folder>: Path to the directory containing merger data and converted strain.
-                  [use_symlog]: Optional. Use symmetric log scale for strain (True/False, default: False)."""
+                f"Usage: python3 {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]\n\n"
+                f"Example: python {sys.argv[0]} ../data/GW150914_data/r100 true\n\n"
+                "Arguments:\n"
+                "\t<path_to_data_folder>: Path to the directory containing merger data and converted strain.\n"
+                "\t                       Use LIST for a list of available data directories.\n"
+                "\t[use_symlog]: Optional. Use symmetric log scale for strain (True/False, default: False)."
             ) # Use f-string for cleaner formatting
         else:
             # Change directories and extraction radius based on inputs
-            bh_dir = str(sys.argv[1])
+            simulation_name = sys.argv[1]
+            bh_dir = os.path.join("../data", simulation_name)
 
             # Set psi4_output_dir relative to bh_dir
             psi4_output_dir = os.path.join(bh_dir, "strain")
@@ -1008,24 +631,35 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         # Default use_symlog is False
 
     # --- Ensure directories exist ---
-    if not os.path.isdir(bh_dir):
-        raise FileNotFoundError(f"Data directory not found: {bh_dir}")
-    if not os.path.isdir(psi4_output_dir):
-         print(f"Warning: Converted strain directory not found: {psi4_output_dir}. Attempting to load strain files from data directory.")
-         # Allow fallback to bh_dir if converted_strain doesn't exist,
-         # but psi4strain function needs to handle this path correctly.
-         # For extract_max_strain_and_zoomout_time, we pass the expected dir.
-         # If psi4strain.psi4_ffi_to_strain needs the base dir, adjust its call.
+
+    # List of available directories
+    data_path = "../data"
+    available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
+
+    # Generate a string to list all available directories in the data path
+    dir_str = f"Available directories in {data_path}:\n\n"
+    for name in available_dirs:
+        dir_str += name + "\n"
+
+    # Handle the case where the user has asked for the directory list
+    if simulation_name == "LIST":
+        print(f"\n{dir_str}")
+        sys.exit(0)
+    # Handle the case where the user entered an invalid simulation name. Also gives the directory list
+    elif simulation_name not in available_dirs:
+        raise FileNotFoundError(f"Data directory not found: {bh_dir}\n\n{dir_str}")
 
     # --- Movie File Path Handling ---
-    bh_file_name = "puncture_posns_vels_regridxyzU.txt"
-    bh_file_path = os.path.join(bh_dir, bh_file_name)
+    bh_file_name = "puncture_posns_vels_regridxyzU.txt" # Name for the black hole position file
+    bh_file_path = os.path.join(bh_dir, "puncture", bh_file_name) # Black hole position file path
+    # Puncture file MUST EXIST for code to run
     if not os.path.isfile(bh_file_path):
          raise FileNotFoundError(f"Black hole position file not found: {bh_file_path}")
 
-    bh_scaling_factor = 1.0 # Scaling for BH visualization size
+    bh_scaling_factor = 2.0 # Visual scaling of black holes
 
-    movie_number = 1
+    # A while loop to figure out where to save the simulation
+    movie_number = 1 # Movies are saved as real_movie1, real_movie2, etc
     while True:
         movie_dir_name = f"real_movie{movie_number}"
         movie_file_path = os.path.join(movie_dir, movie_dir_name)
@@ -1035,7 +669,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             response = input(f"{movie_file_path} already exists. Would you like to overwrite it? Y/N: ")
             if response.lower() != 'y':
                 movie_number += 1
-                continue
+                continue # Continue if no clear permission was given
 
             # User confirmed overwrite
             print(f"Overwriting existing files in {movie_file_path}...")
@@ -1050,14 +684,14 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             except FileNotFoundError:
                 # The directory might have been deleted between check and listdir
                 print(f"Warning: Directory {movie_file_path} disappeared.")
-                # Proceed to create it again.
-                continue
+                # Allow code to continue, creating the movie file path from scratch this time
             except Exception as e:
                 raise RuntimeError(f"Error clearing directory {movie_file_path}: {e}")
 
         # If no directory of the same name is present, create one (and parent movie_dir if needed)
         try:
-            os.makedirs(movie_file_path, mode=0o755, exist_ok=True) # exist_ok handles race condition if created between ch>            print(f"Output will be saved in: {movie_file_path}")
+            os.makedirs(movie_file_path, mode=0o755, exist_ok=True)
+            print(f"Output will be saved in: {movie_file_path}")
             break # Exit loop after successful creation or confirmation
         except OSError as e:
             raise RuntimeError(f"Could not create output directory {movie_file_path}: {e}")
@@ -1066,19 +700,22 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
     psi4_dir = os.path.join(bh_dir, "psi4")
     strain_dir = os.path.join(bh_dir, "strain")
+    psi4_exists = os.path.isdir(psi4_dir)
     strain_exists = os.path.isdir(strain_dir)
+
+    strain_files = []
+    psi4_files = []
     if strain_exists: # If strain data is provided, use file names from that one
-        file_list = os.listdir(strain_dir)
-        data_dir = strain_dir
-    elif os.path.isdir(psi4_dir): # If psi 4 data is provided, use file names from that one
-        file_list = os.listdir(psi4_dir)
-        data_dir = psi4_dir
-    else:
+        strain_file_list = os.listdir(strain_dir)
+        strain_files += [f for f in strain_file_list if os.path.isfile(os.path.join(strain_dir, f))] # List only files
+    if psi4_exists: # If psi 4 data is provided, use file names from that one
+        psi4_file_list = os.listdir(psi4_dir)
+        psi4_files += [f for f in psi4_file_list if os.path.isfile(os.path.join(psi4_dir, f))] # List only files
+    if not (strain_exists or psi4_exists):
         # Throw an error if no data is provided
         raise FileNotFoundError(f"No psi4 or strain data found in the directory {bh_dir}")
 
-    bh_files = [f for f in file_list if os.path.isfile(os.path.join(data_dir, f))] # List the names of these files
-
+    bh_files = strain_files + psi4_files # Concatenate psi4 and strain files into general files
     extraction_radii = np.empty(0)
     for b in bh_files:
         # Attempt to convert the part of the file name that is supposed to be the extraction radius into a float
@@ -1116,11 +753,17 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
     print(f"Using extraction radius {ext_rad} for {'strain' if strain_exists else 'psi_4'} data")
 
+    # Check to see which directory houses the appropriate ext_rad
+    r_ext_in_strain = False
+    for file in strain_files:
+        if str(ext_rad) in file:
+            r_ext_in_strain = True # If the extraction radius is in strain file name, set to true. Else, default to psi4
+
     # --- Minimum and Maximum Ell Mode Calculations ---
     ells = np.empty(0)
     # Convert extraction radius used into a properly formatted string ####.# to determine which files to search
     str_ext_rad = ("0" if ext_rad < 1000 else "") + str(ext_rad)
-    for b in bh_files:
+    for b in (strain_files if r_ext_in_strain else psi4_files):
         # Only search files with the appropriate extraction radius
         if b[-10:-4] == str_ext_rad:
             # Attempt to convert the part of the file name that is supposed to be the mode into an integer
@@ -1149,12 +792,11 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for {'strain' if strain_exists else 'psi_4'} data")
 
     # --- Simulation & Visualization Parameters ---
-    display_radius = 300  # radius for the mesh visualization
     n_rad_pts = 450       # number of points along the radius
     n_azi_pts = 180       # number of points along the azimuth
     colat = np.pi / 2     # colatitude angle (pi/2 for equatorial plane)
 
-    # Cosmetic parameters
+    # Cosmetic & camera parameters
     wireframe = True
     frames_per_second = 24
     save_rate = 10  # Saves every Nth simulation time step
@@ -1162,34 +804,29 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     gw_color = (0.28, 0.46, 1.0) # Blueish
     bh_color = (0.1, 0.1, 0.1)   # Dark grey/black
     zoomout_distance = 350 # Max camera distance after zoomout
-    elevation_angle = 34   # Initial camera elevation
+    initial_elevation_angle = 50 # Initial camera elevation 
+    final_elevation_angle = 34   # Final camera elevation
+    azi_angle = 45 # Default pi/4 azimuth camera angle
 
-    time1 = time.time()
-
-    if STATUS_MESSAGES:
-        print( # Horizontal line of asterisks
-            f"""{'*' * 70}
-    Initializing grid points..."""
-        )
-    strain_array, grid, points = initialize_tvtk_grid(n_azi_pts, n_rad_pts)
-
-    time2=time.time()
+    time1 = time.time() # End of initial setup
 
     if STATUS_MESSAGES:
         print( # Horizontal line of asterisks
-            f"""{'*' * 70}
-    Converting psi4 data to strain..."""
-        )
+            f"{'*' * 70}\nConverting psi4 data to strain...")
 
-    if strain_exists:
-        print(f"Using existing strain data files in {strain_dir}")
-        mode_data = None
+    # See if strain files exist, and if so, attempt to load them
+    if r_ext_in_strain:
+        # One time iteration parameters
         time_array_set = False
         mode_data_set = False
 
+        print(f"Using existing strain data files in {strain_dir}")
+
+        # Iterate through each l mode and extract the appropriate strain data 
         files_processed = 0
         for l in range(ell_min, ell_max + 1):
-            # Construct filename safely
+
+            # Construct filename and file path safely
             filename = psi4strain.STRAIN_FILE_FMT + f"_l{l}-r{0 if ext_rad < 1000 else ''}{ext_rad}.txt"
             file_path = os.path.join(psi4_output_dir, filename)
 
@@ -1199,6 +836,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
             max_col_idx = 2 * l + 1
             cols_to_use = range(0, max_col_idx + 1) # Range includes 0, stops before max_col_idx + 1
 
+            # Try to load the text files
             try:
                 # Load data, skipping header lines dynamically
                 # Header lines = 1 (time) + (number of modes = 2l+1)
@@ -1217,18 +855,23 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
                 print(f"Warning: Index error loading columns from {file_path}. Skipping l={l}.")
                 continue
 
+            # For the first l mode, set the time array to the first column (the time column)
             if not time_array_set:
                 time_array = data_all[:, 0].real
                 time_array_set = True
+            # For the first l mode, initialize the shape of the mode_data
             if not mode_data_set:
                 mode_data = np.empty((0, len(time_array)))
                 mode_data_set = True
 
+            # Iteratively add to 2D mode_data array: shape (all l and m, n_times)
             mode_data = np.vstack((mode_data, data_all[:, 1:].T))
 
+        # If all the files are skipped, end the program
         if files_processed == 0:
             raise FileNotFoundError(f"No valid strain files found in directory {psi4_output_dir} for l={ell_min} to {ell_max}.")
 
+    # If there is no strain, use psi4_FFI_to_strain to convert psi 4 into strain
     else:
         # Convert psi4 to strain and load strain data
         try:
@@ -1239,19 +882,17 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         except Exception as e:
             raise RuntimeError(f"An unexpected error occurred during psi4 data conversion and strain loading: {e}")
 
+    # Extract number of times and throw an error if there are no times
     n_times = len(time_array)
     if n_times == 0:
         raise ValueError(f"Loaded time array is empty. Cannot proceed.")
     n_frames = int(n_times / save_rate)
     print(f"Loaded {mode_data.shape[0]} modes over {n_times} time steps.")
 
-    time3=time.time()
+    time2=time.time() # End of strain conversion
 
     if STATUS_MESSAGES:
-        print( # Horizontal line of asterisks
-            f"""{'*' * 70}
-    Calculating black hole trajectories..."""
-        )
+        print(f"{'*' * 70}\nCalculating black hole trajectories...")
 
     # Import black hole data using more efficient loading
     try:
@@ -1287,21 +928,20 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     bh1_avg_mass = np.mean(bh_data[pre_merge, 1])
     bh2_avg_mass = np.mean(bh_data[pre_merge, 14])
 
+    bh_total_mass = bh1_avg_mass + bh2_avg_mass
+    bh1_rel_mass = bh1_avg_mass / bh_total_mass
+    bh2_rel_mass = bh2_avg_mass / bh_total_mass
+
     if bh1_avg_mass == 0 or bh2_avg_mass == 0:
         print("Warning: Mean mass is zero pre-merger, using default masses from GW150914.")
         # Keep default bh1_mass, bh2_mass
 
     else:
         # Sets the second black hole as the more massive one if not already
-        if bh1_avg_mass > bh2_avg_mass:
-            bh1_avg_mass, bh2_avg_mass = bh2_avg_mass, bh1_avg_mass
+        if bh1_rel_mass > bh2_rel_mass:
+            bh1_rel_mass, bh2_rel_mass = bh2_rel_mass, bh1_rel_mass
 
-        # For the purpose of scaling, the larger black hole's mass will be set to one, and the smaller black hole's mass
-        # is adjusted accordingly by computing a ratio of the masses
-        bh2_mass = 1
-        bh1_mass = bh1_avg_mass / bh2_avg_mass # This will later be used as the mass ratio since bh1_mass / bh2_mass is now
-                                               # bh1_mass
-
+        mass_ratio = bh1_rel_mass / bh2_rel_mass
     # Extract BH coordinates (Check columns: 3=x, 4=y, assuming z=0 initially)
     bh1_x0, bh1_y0 = bh_data[:, 3], bh_data[:, 4]
     bh1_z0 = np.zeros_like(bh1_x0)  # Assume motion is in xy-plane
@@ -1309,7 +949,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # Interpolate BH positions to the *strain* time array (equal_times)
     # Time array optimization: Use the actual strain time array for interpolation basis
     equal_times = np.linspace(time_array[0], time_array[-1], num=n_times) # Create equally spaced times for output frames
-    merge_idx_equal = idx_time(equal_times, merge_time) # Find merge index in the output time array
+    merge_idx_equal = find_idx(equal_times, merge_time)[0] # Find merge index in the output time array
 
     # Maintain original interpolation call
     bh1_x, bh1_y, bh1_z = interpolate_coords_by_time(
@@ -1322,68 +962,100 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
     # Single array operation for all coordinates
     bh2_coords = np.concatenate([
-        -np.column_stack((bh1_x[pre_slice], bh1_y[pre_slice], bh1_z[pre_slice])) * bh1_mass, # bh1_mass works as mass ratio
+        -1 * mass_ratio * np.column_stack((bh1_x[pre_slice], bh1_y[pre_slice], bh1_z[pre_slice])),
         np.column_stack((bh1_x[post_slice], bh1_y[post_slice], bh1_z[post_slice])) # bh2 initially moves opposite bh1, but
                                                                                    # changes to following bh1 after merge
     ])
     bh2_x, bh2_y, bh2_z = bh2_coords.T  # Transpose and unpack
 
-    time4=time.time()
+    print(f"Black hole mass ratio: {1/mass_ratio:.3f}:{1}")
+
+    time3=time.time() # End of black hole position calculations
+
+    if STATUS_MESSAGES:
+        print(f"{'*' * 70}\nComputing camera parameters...")
+
+    # Configure engine and rendering upfront in order to calculate visual parameters
+    engine = Engine()
+    # Create figure AFTER engine starts if offscreen 
+    fig = mlab.figure(engine=engine, size=resolution) # Default background color
+    scene = fig.scene # Get the current scene
+    scene_size = scene.get_size() # Returns (width, height) of the scene
+    try:
+        aspect_ratio = scene_size[0] / scene_size[1] # Calculate the aspect ratio. This is used to calculate horizontal FOV
+    except ZeroDivisionError as e:
+        # Throw an error if height is somehow zero
+        raise ValueError("Height of the scene is zero. Cannot calculate aspect ratio.")
+    camera = scene.camera # Get the camera parameters of the scene
+    vert_FOV = np.radians(camera.view_angle) # Get the vertical field of vision angle in radians
+    horz_FOV = 2 * np.arctan(np.tan(vert_FOV / 2) * aspect_ratio) # Get the horizontal field of vision angle
+    # Find out which field of view is larger and smaller. The smaller FOV will be used to calculate how far the
+    # camera should zoom out (since both black holes should be visible even if lined up along the smaller FOV 
+    # at the start). The larger FOV will be used to calculate the display radius (since the mesh needs to take up
+    # the entire screen from the start)
+    larger_FOV, smaller_FOV = np.maximum(horz_FOV, vert_FOV), np.minimum(horz_FOV, vert_FOV)
+
+    # Calculate appropriate display radius
+    magnitudes = np.sqrt(bh1_x**2 + bh1_y**2) # Get the distance between bh1 and the center (bh1 is less massive)
+    init_elevation_rads = np.radians(initial_elevation_angle)
+    fin_elevation_rads = np.radians(final_elevation_angle)
+    # Calculate the appropriate starting zoom based on limiting camera parameters and black hole initial positions
+    zoom_start = np.maximum(80, magnitudes[0] * np.sin((np.pi - smaller_FOV) / 2 + fin_elevation_rads) \
+                 / np.sin(smaller_FOV / 2))
+
+    print(f"Starting zoom: {zoom_start}")
+
+    time4 = time.time() # End of camera parameter calculations
+
     if STATUS_MESSAGES:
         print( # Horizontal line of asterisks
-            f"""{'*' * 70}
-    Calculating cosmetic data..."""
+            f"{'*' * 70}\nInitializing grid points..."
         )
-    # Find radius of the center hole in the mesh (based on uninterpolated max separation + BH size)
-    # Hole radius = factor * (max_sep + scaled radius of larger BH)
-    omitted_radius_length = 1.45*(np.sqrt(np.max(bh1_x0**2 + bh1_y0**2)) + bh_scaling_factor * max(bh1_mass, bh2_mass))
 
-    # Find point at which to taper off gravitational waves
-    width = 0.5 * omitted_radius_length # Width of the transition region
-    dropoff_radius = width + omitted_radius_length # Radius at which to start tapering beyond the hole
+    # Calculate the display radius based on limiting final camera parameters
+    start_view_radius = np.hypot(zoom_start * np.cos(larger_FOV) * np.sin(larger_FOV / 2) \
+                        / (np.cos(init_elevation_rads + larger_FOV / 2) * np.cos(init_elevation_rads)), \
+                        zoom_start * np.cos(init_elevation_rads) * np.tan(larger_FOV / 2))
+    display_radius = np.maximum(300, start_view_radius) # Ensures the display radius is, at a minimum, 300
+    print(f"Display radius: {display_radius}")
 
-    # --- Extract critical strain values and zoom time ---
-    try:
-         # Pass the directory where converted files are expected
-         strain_after_burst, max_strain, zoomout_time = extract_max_strain_and_zoomout_time(mode_data, ext_rad, ell_min, ell_max)
-    except FileNotFoundError as e:
-         raise FileNotFoundError(f"Cannot calculate max strain/zoom time: {e}. Ensure strain files exist.")
-    except Exception as e:
-         raise RuntimeError(f"Error during max strain/zoom time calculation: {e}")
+    # Defining a shifted error function, rising sharply after the default display radius. This will be used to determine
+    # how much to add to the distance between each radius point on the mesh grid. Points outside the default display
+    # radius will be rendered at lower resolutions, depending on available memory
+    def shifted_erf(x):
+        return 1 + erf(x - 300)
 
-    # Find max z allowable without impeding view of center hole (based on dropoff radius)
-    try:
-         tangent = np.tan(np.radians(elevation_angle))
-         if tangent == np.nan:
-             raise ValueError(f"Cannot calculate max allowable z coordinate. Ensure camera elevation angle is not 90 degrees.")
-         z_max = dropoff_radius / tangent
-    except ZeroDivisionError as e:
-         raise ZeroDivisionError(f"Cannot calculate max allowable z coordinate: {e}. Ensure camera elevation angle is not zero.")
+    float64size = np.dtype(np.float64).itemsize # Get the size of a float64 object
+    n_equal_times = len(equal_times) # Calculate how many equally spaced times are available
+    available_memory = psutil.virtual_memory().available - 1000000000 # Get the available memory, with a significant buffer
+    # Calculate the number of radius points. Default is 350, then as many additional points are added as memory will allow.
+    max_rads = 350 + int((available_memory) / (n_equal_times * n_azi_pts * float64size))
+    print(f"Maximum radius points: {max_rads}")
 
-    # Calculate factor by which to scale strain data
-    if max_strain == 0:
-        amplitude_scale_factor = 1.0 # Default scaling if no strain detected
-        print("Warning: Max strain is zero, using default amplitude scaling.")
-    else:
-        # Calculate the amplitude scale factor using symlog of max strain (if enabled)
-        amplitude_scale_factor = z_max / (np.sign(max_strain) * np.log1p(np.abs(max_strain)) if use_symlog else max_strain)
+    # Calculate by what factor the shifted error function should be scaled vertically
+    resolution_dropoff_factor = (display_radius - 300) / (2 * (max_rads - 450)) - 1 / 3
+    gen_rad = 0
+    rad_vals = []
+    # Loop through radius values, generating each radius point until the display radius is reached
+    while gen_rad < display_radius:
+        rad_vals.append(gen_rad)
+        # Calculate the next distance between radius points. Within the default display radius, rad_delta is typically
+        # Close to 2/3, which is default
+        rad_delta = resolution_dropoff_factor * shifted_erf(gen_rad) + 2 / 3
+        gen_rad += rad_delta
 
-    # Report calculated values
-    # Use f-strings for print statements
-    print(f"Max overall strain (iterative peaks): {max_strain}")
-    print(f"Strain value after burst: {strain_after_burst}")
-    print(f"Amplitude scale factor: {amplitude_scale_factor}")
+    # Ensure the display radius point is also added to rad_vals, for consistent edges
+    if display_radius not in rad_vals:
+        rad_vals.append(display_radius)
 
-    if zoomout_time == float('inf'):
-         print("Zoomout time: Not determined (likely too few peaks). Zoomout disabled.")
-         zoomout_idx = n_times # Set index beyond array to disable zoom
-    else:
-         print(f"Calculated zoomout time: {zoomout_time}")
-         # Find closest index in the *output* time array (equal_times)
-         zoomout_idx = idx_time(equal_times, zoomout_time)
+    # Cast the rad_vals as a numpy array and get the length
+    radius_values = np.array(rad_vals)
+    n_rad_pts = len(radius_values)
+
+    # Initialize a grid with the calculated azimuth and radius points
+    strain_array, grid, points = initialize_tvtk_grid(n_azi_pts, n_rad_pts)
 
     # theta and radius values for the mesh
-    radius_values = np.linspace(0, display_radius, n_rad_pts, dtype=np.float32) # Use float32 for memory
     azimuth_values = np.linspace(0, 2 * np.pi, n_azi_pts, endpoint=False, dtype=np.float32) # Use float32
 
     # Create meshgrid (ij indexing gives radius changing fastest)
@@ -1392,44 +1064,78 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     x_values = rv * np.cos(az)
     y_values = rv * np.sin(az)
 
-    # Dropoff factor (smooth transition to zero amplitude near omitted hole), apply amplitude scale factor
-    dropoff_2D_flat = (0.5 + 0.5 * erf((radius_values - dropoff_radius)/width)).ravel() * amplitude_scale_factor
+    # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
+    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max).real
 
-    time5 = time.time()
+    # Broadcasts equal_times and radius_values together to create a 2D array (n_radii, n_times) that shows the retarded
+    # time at each radius, plus the extraction radius
+    lerp_times = equal_times[np.newaxis, :] - radius_values[:, np.newaxis] + ext_rad
+
+    time5=time.time() # End of grid setup
 
     if STATUS_MESSAGES:
         print( # Horizontal line of asterisks
-        f"""{'*' * 70}
-    Constructing mesh points in 3D..."""
+            f"{'*' * 70}\nCalculating cosmetic data..."
         )
 
-    # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
-    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max).real
-    lerp_times = generate_interpolation_points(equal_times, radius_values, ext_rad)
+    # Find radius of the center hole in the mesh (based on uninterpolated max separation + BH size)
+    # Hole radius = factor * (max_separation + scaled radius of larger BH)
+    omitted_radius_length = 1.45*(magnitudes[0] + bh_scaling_factor * max(bh1_rel_mass, bh2_rel_mass))
+    if omitted_radius_length > 22:
+        omitted_radius_length = 0 # Ensure that simulations where black holes are really far apart don't generate massive
+                                  # holes
 
+    # Find point at which to taper off gravitational waves
+    width = 0.5 * omitted_radius_length # Width of the transition region
+    dropoff_radius = width + omitted_radius_length # Radius at which to start tapering beyond the hole
+
+    # Find max amplitude scale factor allowable without impeding view of center hole (based on dropoff radius)
+    if omitted_radius_length == 0:
+        # If the black holes are very far apart, use default methods for calculating amplitude scale factor
+        # No fancy methods used, just making sure the waves aren't scaled too high by taking into account max strain
+        print("Warning: Black holes are spaced too far apart. No hole will be generated in the mesh. "
+              "Using default amplitude scaling.")
+        amplitude_scale_factor = 0.1 / np.max(strain_azi[0, :])
+        dropoff_2D_flat = np.full(len(radius_values), amplitude_scale_factor)
+    else:
+        # Apply amplitude scale factor calculation based on spin-weighted spherical harmonics max strain
+        amplitude_scale_factor = get_amplitude_scale_factor(np.sign(strain_azi) * np.log1p(np.abs(strain_azi)) if use_symlog else strain_azi, azimuth_values, omitted_radius_length, zoomout_distance, fin_elevation_rads, np.radians(azi_angle)) 
+        # Dropoff factor (smooth transition to zero amplitude near omitted hole), apply amplitude scale factor
+        dropoff_2D_flat = (0.5 + 0.5 * erf((radius_values - dropoff_radius)/width)).ravel() * amplitude_scale_factor
+
+    # Report calculated values
+    print(f"Amplitude scale factor: {amplitude_scale_factor:.3f}")
+
+    # Zoom out a quarter of the way through the data
+    zoomout_time = (equal_times[-1] - equal_times[0]) / 4
+    zoomout_idx = find_idx(equal_times, zoomout_time)[0]
+
+    time6 = time.time() # End of cosmetic data calculations
+
+    if STATUS_MESSAGES:
+        print(f"{'*' * 70}\nConstructing mesh points in 3D...")
+
+    # Interpolate the strain to the appropriate points on the mesh grid
     strain_to_mesh = compute_strain_to_mesh(
-        strain_azi, 
-        equal_times.astype(np.float32), # Pass float32 version 
-        radius_values, # Already float32
-        lerp_times, # Already float32
-        time_array.astype(np.float32), # Pass float32 version
+        strain_azi,
+        equal_times.astype(np.float32),
+        radius_values,
+        lerp_times,
+        time_array.astype(np.float32),
         dropoff_2D_flat,
         use_symlog,
         STATUS_MESSAGES
     )
-    # Result shape (n_rad_pts, n_azi_pts, n_times)
 
-    time6=time.time()
+    time7=time.time()
 
     if STATUS_MESSAGES:
-        print( # Horizontal line of asterisks
-        f"""{'*' * 70}
-    Initializing animation..."""
-        )
+        print(f"{'*' * 70}\nInitializing animation...")
 
     # --- Precompute values for animation loop ---
-    bh1_scaled_radius = bh1_mass * bh_scaling_factor
-    bh2_scaled_radius = bh2_mass * bh_scaling_factor
+    bh1_scaled_radius = bh1_rel_mass * bh_scaling_factor
+    bh2_scaled_radius = bh2_rel_mass * bh_scaling_factor
+    bh_merged_radius = (bh1_scaled_radius + bh2_scaled_radius) / bh2_scaled_radius
 
     # Indices of the simulation time steps to actually render
     valid_indices = np.arange(0, n_times, save_rate)
@@ -1459,13 +1165,20 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # Precompute camera parameters for each output frame
     time_indices = np.arange(n_times) # Indices 0 to n_frames-1
     # Smoothly decrease elevation angle over time until it hits the target (this means the camera rises)
-    elevations = np.maximum(50 - time_indices * 0.016, elevation_angle)
+    elevations = np.maximum(initial_elevation_angle - time_indices * 0.016, final_elevation_angle)
     # Smoothly increase distance during zoomout phase
-    distances = np.minimum(np.where(
-        time_indices < zoomout_idx,
-        80,
-        80 + (time_indices - zoomout_idx) * 0.175
-    ), zoomout_distance)
+    if zoom_start < zoomout_distance:
+        distances = np.minimum(np.where(
+            time_indices < zoomout_idx,
+            zoom_start,
+            zoom_start + (time_indices - zoomout_idx) * 0.175
+        ), zoomout_distance)
+    elif zoom_start > zoomout_distance:
+        distances = np.maximum(np.where(
+            time_indices < zoomout_idx,
+            zoom_start,
+            zoom_start - (time_indices - zoomout_idx) * 0.175
+        ), zoomout_distance)
 
     # Precompute merge rescale index
     merge_condition = (valid_indices > merge_idx_equal) & (valid_indices < merge_idx_equal + save_rate)
@@ -1480,11 +1193,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
     # Configure engine and rendering upfront
     mlab.options.offscreen = False # Set True for non-interactive rendering to files
-    engine = Engine()
     engine.start()
-
-    # Create figure AFTER engine starts if offscreen
-    fig = mlab.figure(engine=engine, size=resolution) # Default background color
 
     # Initialize visualization objects once
     # GW Surface
@@ -1500,12 +1209,13 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
     # Report setup times - Use f-strings
     print(f"Timing Report (seconds):")
     print(f"  Parameter & Movie Setup: {time1 - time0:.3f}")
-    print(f"  Grid Init: {time2 - time1:.3f}")
-    print(f"  Psi 4 Conversion/Strain Load: {time3 - time2:.3f}")
-    print(f"  BH Trajectories: {time4 - time3:.3f}")
-    print(f"  Cosmetic Calcs: {time5 - time4:.3f}")
-    print(f"  Mesh Construction: {time6 - time5:.3f}")
-    print(f"  Animation Setup: {start_time - time6:.3f}")
+    print(f"  Psi 4 Conversion/Strain Load: {time2 - time1:.3f}")
+    print(f"  BH Trajectories: {time3 - time2:.3f}")
+    print(f"  Camera Parameters: {time4 - time3:.3f}")
+    print(f"  Grid Init: {time5 - time4:.3f}")
+    print(f"  Cosmetic Calcs: {time6 - time5:.3f}")
+    print(f"  Mesh Construction: {time7 - time6:.3f}")
+    print(f"  Animation Setup: {start_time - time7:.3f}")
     print(f"  Total Setup Time: {start_time - time0:.3f}")
 
     # --- Animation Loop ---
@@ -1528,17 +1238,18 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
                 # Update progress percent
             if STATUS_MESSAGES and time_idx !=0 and current_percent < len(percentage_thresholds) and time_idx > percentage_thresholds[current_percent]:
                 eta = ((time.time() - start_time) / time_idx) * (n_times - time_idx)
-                print(f"{int(time_idx  * 100 / n_times)}% done, ", f"{dhms_time(eta)} remaining", end="\r", flush=True)
+                print(f"{int(time_idx  * 100 / n_times)}% done, ", f"{dhms_time(eta)} remaining\t\t\t", end="\r", flush=True)
                 current_percent +=1
 
             # --- Update Scene Objects ---
             # Rescale bh2 if black holes have merged to represent combined object (at the specific frame index)
             if idx == merge_rescale_idx:
-                rescale_object(bh2, (bh1_scaled_radius + bh2_scaled_radius) / bh2_scaled_radius)
+                # For a sphere, equally scale in all directions
+                bh2.actor.actor.scale = bh_merged_radius, bh_merged_radius, bh_merged_radius
 
             # Update black hole positions using interpolated data for the current *simulation time index*
-            change_object_position(bh1, (bh1_x[time_idx], bh1_y[time_idx], bh1_z[time_idx]))
-            change_object_position(bh2, (bh2_x[time_idx], bh2_y[time_idx], bh2_z[time_idx]))
+            bh1.actor.actor.position = bh1_x[time_idx], bh1_y[time_idx], bh1_z[time_idx] # Update first bh position
+            bh2.actor.actor.position = bh2_x[time_idx], bh2_y[time_idx], bh2_z[time_idx] # Update second bh position
 
             # Update Mesh Z-coordinates (Strain Visualization)
             # Get the strain slice for the current *simulation time index*
@@ -1557,6 +1268,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
 
             # --- Update Camera ---
             mlab.view(
+                azimuth=azi_angle,
                 elevation=elevations[time_idx], # Use precomputed elevation for this frame
                 distance=distances[time_idx], # Use precomputed distance for this frame
                 focalpoint=(0, 0, 0) # Keep focused on the origin
@@ -1576,9 +1288,7 @@ Example: python {sys.argv[0]} ../data/GW150914_data/r100 100 true
         print("\nDone", flush=True) # Newline after progress bar
         # Use f-strings for final messages
         print(
-            f"\nSaved {n_frames} frames to {movie_file_path} ",
-            f"in {dhms_time(total_time)}.",
-        )
+            f"\nSaved {n_frames} frames to {movie_file_path} in {dhms_time(total_time)}.")
         print("Creating movie...")
         try:
             convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
