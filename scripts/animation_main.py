@@ -47,8 +47,8 @@ from moviepy import VideoFileClip, AudioFileClip
 import matplotlib.pyplot as plt
 
 # Default parameters used when USE_SYS_ARGS is False
-BH_DIR = "../bh_data/GW150914_data/r100" # changeable with sys arguments
-MOVIE_DIR = "../bh_data/GW150914_data/movies" # changeable with sys arguments
+BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
+MOVIE_DIR = "../data/GW150914_data/movies" # changeable with sys arguments
 S_MODE = -2
 EXT_RAD = 100 # changeable with sys arguments
 
@@ -709,7 +709,7 @@ def main() -> None:
             # Use raise RuntimeError for error exit
             raise RuntimeError(
                 f"Usage: python3 {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]\n\n"
-                f"Example: python {sys.argv[0]} ../bh_data/GW150914_data/r100 true\n\n"
+                f"Example: python {sys.argv[0]} ../data/GW150914_data/r100 true\n\n"
                 "Arguments:\n"
                 "\t<path_to_data_folder>: Path to the directory containing merger data and converted strain.\n"
                 "\t                       Use LIST for a list of available data directories.\n"
@@ -718,7 +718,7 @@ def main() -> None:
         else:
             # Change directories and extraction radius based on inputs
             simulation_name = sys.argv[1]
-            bh_dir = os.path.join("../bh_data", simulation_name)
+            bh_dir = os.path.join("../data", simulation_name)
 
             # Set psi4_output_dir relative to bh_dir
             psi4_output_dir = os.path.join(bh_dir, "strain")
@@ -744,7 +744,7 @@ def main() -> None:
     # --- Ensure directories exist ---
 
     # List of available directories
-    data_path = "../bh_data"
+    data_path = "../data"
     available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
 
     # Generate a string to list all available directories in the data path
