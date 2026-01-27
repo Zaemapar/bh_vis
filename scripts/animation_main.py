@@ -5,6 +5,16 @@ of the black holes and their gravitational waves. At each state, the black holes
 moved to their respective positions and the render is saved as a .png file.
 """
 
+# --- ADJUSTABLE PARAMETERS FOR VISUALIZATION ---
+# Feel free to modify to change the appearance of the movie/rendering process!
+
+USE_SYS_ARGS = True # Change to turn on/off default parameters. Leave on if you want to input your own data.
+STATUS_MESSAGES = True # Change to turn on/off status reports during rendering
+TRAJECTORY_LINES = False # Change to turn on/off lines tracking trajectories of black holes
+PIP_VIEW = False # Change to turn on/off picture in picture view at corner of movie showing close up of black holes
+FREQ_SOUND = True # Change to turn on/off background sound based on strain frequency
+APPARENT_HORIZONS = False # Change to turn on/off accurate horizon rendering. Use only if you have data.
+
 import os
 import sys
 import time
@@ -18,6 +28,7 @@ from scipy.interpolate import griddata
 from scipy.special import erf  # Vectorized error function for arrays
 from scipy.integrate import quad
 from scipy.spatial import ConvexHull
+from scipy.signal import hilbert
 import quaternionic
 import spherical
 import imageio.v2 as imageio
@@ -31,20 +42,30 @@ from mayavi.modules.surface import Surface
 from mayavi.modules.scalar_cut_plane import ScalarCutPlane
 import psi4_FFI_to_strain as psi4strain
 import traceback
+from scipy.io.wavfile import write as write_wav
+from moviepy import VideoFileClip, AudioFileClip
+import matplotlib.pyplot as plt
 
 # Default parameters used when USE_SYS_ARGS is False
-BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
-MOVIE_DIR = "../data/GW150914_data/movies" # changeable with sys arguments
+BH_DIR = "../bh_data/GW150914_data/r100" # changeable with sys arguments
+MOVIE_DIR = "../bh_data/GW150914_data/movies" # changeable with sys arguments
 S_MODE = -2
 EXT_RAD = 100 # changeable with sys arguments
-USE_SYS_ARGS = True # Change to turn on/off default parameters
-STATUS_MESSAGES = True # Change to turn on/off status reports during rendering
 
-def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128], ell_min: int, ell_max: int) -> NDArray[np.complex128]:
+def plt_data(arr):
+    plt.plot(np.linspace(0, len(arr), len(arr)), arr)
+    plt.grid(True)
+    plt.show()
+
+def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128], ell_min: int, ell_max: int, status_messages=True) -> NDArray[np.complex128]:
     """
     Sum all the strain modes after factoring in the
     corresponding spin-weighted spherical harmonic
     for the specified angles in the mesh. Stored as an array corresponding to [angle, time] indices.
+
+    This version is optimized to avoid creating the large intermediate
+    (n_modes, n_pts, n_times) array by looping over the modes
+    and summing the contributions directly.
 
     :param colat: Colatitude angle for the SWSH factor.
     :param azi: Azimuthal angles for the SWSH factor.
@@ -52,25 +73,42 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDA
     :param ell_min: Minimum l mode to use in SWSH
     :param ell_max: Maximum l mode to use in SWSH
     :return: A complex valued numpy array of the superimposed wave, shape (n_azi_pts, n_times).
-
-    DocTests:
-    >>> mode_data = np.zeros((77, 3), dtype=complex)
-    >>> mode_idx = 0
-    >>> for l in range(2, 9):
-    ...     for m in range(-l, l+1):
-    ...         mode_data[mode_idx] = np.array([1+1j, 2+3j, 4+5j])
-    ...         mode_idx += 1
-    >>> np.round(swsh_summation_angles(np.pi/2, np.array([0]), mode_data, 2, 8), 5)
-    array([[ 4.69306 +4.69306j,  9.38612+14.07918j, 18.77224+23.4653j ]])
     """
+
     quat_arr = quaternionic.array.from_spherical_coordinates(colat, azi)
     winger = spherical.Wigner(ell_max, ell_min)
     # Create an swsh array shaped like (n_modes, n_quaternions)
     swsh_arr = winger.sYlm(S_MODE, quat_arr).T
-    # mode_data has shape (n_modes, n_times), swsh_arr has shape (n_modes, n_pts).
-    # Pairwise multiply and sum over modes: the result has shape (n_pts, n_times).
-    pairwise_product = mode_data[:, np.newaxis, :] * swsh_arr[:, :, np.newaxis]
-    return np.sum(pairwise_product, axis=0)
+
+    # Get shapes of inputs
+    n_modes, n_times = mode_data.shape
+    n_pts = azi.shape[0]
+
+    # Pre-allocate the *final* result array, which fits in memory
+    result = np.zeros((n_pts, n_times), dtype=np.complex128)
+
+    # Loop over the modes (the axis we are summing over) with a progress bar
+    for i in range(n_modes):
+        # Get the contribution for this single mode
+        # mode_data[i, :] has shape (n_times,)
+        # swsh_arr[i, :, np.newaxis] has shape (n_pts, 1)
+        # Their product broadcasts to (n_pts, n_times)
+        contribution = swsh_arr[i, :, np.newaxis] * mode_data[i, :]
+
+        # Add this mode's contribution to the total sum
+        result += contribution
+
+        # Update status
+        if status_messages:
+            # Calculate progress based on the outer loop index 'azi_idx'
+            progress = (i + 1) / (n_modes) * 100
+            # Use f-string formatting
+            print(f"\rProgress: {progress:.1f}% completed", end="", flush=True)
+
+    if status_messages:
+        print() # Print newline after status messages
+
+    return result
 
 def interpolate_coords_by_time(
     old_times: NDArray[np.float64],
@@ -671,7 +709,7 @@ def main() -> None:
             # Use raise RuntimeError for error exit
             raise RuntimeError(
                 f"Usage: python3 {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]\n\n"
-                f"Example: python {sys.argv[0]} ../data/GW150914_data/r100 true\n\n"
+                f"Example: python {sys.argv[0]} ../bh_data/GW150914_data/r100 true\n\n"
                 "Arguments:\n"
                 "\t<path_to_data_folder>: Path to the directory containing merger data and converted strain.\n"
                 "\t                       Use LIST for a list of available data directories.\n"
@@ -680,7 +718,7 @@ def main() -> None:
         else:
             # Change directories and extraction radius based on inputs
             simulation_name = sys.argv[1]
-            bh_dir = os.path.join("../data", simulation_name)
+            bh_dir = os.path.join("../bh_data", simulation_name)
 
             # Set psi4_output_dir relative to bh_dir
             psi4_output_dir = os.path.join(bh_dir, "strain")
@@ -706,7 +744,7 @@ def main() -> None:
     # --- Ensure directories exist ---
 
     # List of available directories
-    data_path = "../data"
+    data_path = "../bh_data"
     available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
 
     # Generate a string to list all available directories in the data path
@@ -769,7 +807,8 @@ def main() -> None:
         except OSError as e:
             raise RuntimeError(f"Could not create output directory {movie_file_path}: {e}")
 
-    movie_path_name = os.path.join(movie_file_path, movie_dir_name + ".mp4") # Full path + name of the movie
+    movie_path = os.path.join(movie_file_path, movie_dir_name) # Full path + name of the movie
+    movie_path_name = movie_path + ".mp4"
 
     # --- Extraction Radius Calculations ---
     bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
@@ -796,18 +835,17 @@ def main() -> None:
         # Attempt to convert the part of the file name that is supposed to be the extraction radius into a float
         try:
             radius_extraction = float(b[-10:-4])
-        except ValueError or IndexError:
-            if b[-7:-4] == "inf":
-                radius_extraction = "inf"
-            else:
+        except (ValueError, IndexError):
+            try:
+                radius_extraction = float(b[-7:-4]) # Handle the case where it might be infinity
+            except (ValueError, IndexError):
                 continue
-        if radius_extraction not in extraction_radii:
-            extraction_radii = np.append(extraction_radii, radius_extraction) # Save the extraction radius if unique
+
+        extraction_radii = np.unique(np.append(extraction_radii, radius_extraction)) # Save the extraction radius if unique
 
     size = len(extraction_radii)
     if size == 1:
-        r_ext_end = extraction_radii[0] # If only one extraction radius is found, use that one
-        ext_rad = -1 if r_ext_end == "inf" else r_ext_end
+        radius_extraction = extraction_radii[0] # If only one extraction radius is found, use that one
     elif size == 0:
         # If no extraction radii are found, the files are probably incorrectly named
         raise RuntimeError("No extraction radii found. Ensure files are formatted as such: {filename}_l#-r{####.# or inf}")
@@ -820,22 +858,20 @@ def main() -> None:
                 # Attempt to parse user input into extraction radius float
                 radius_extraction = float(response)
                 # Print availabe extraction radii if user inputs one that is unavailable
-                if radius_extraction not in extraction_radii:
+                if radius_extraction == float('inf'):
+                    break
+                elif radius_extraction not in extraction_radii:
                     print("Available extraction radii:")
                     for r in extraction_radii:
                         print(r)
                 else:
                     break # End the loop if a valid extraction radius has been entered
             except ValueError:
-                if response[0:3] == "inf": # Handle the case were infinite extraction radius was specified
-                    radius_extraction = -1
-                    break
-                else:
-                    print("Please enter 'inf' or a float from 0.0 to 9999.0.") # Handle the case where something else was entered
+                print("Please enter 'inf' or a float from 0.0 to 9999.0.") # Handle the case where something else was entered
 
-        ext_rad = radius_extraction
+    ext_rad = radius_extraction
 
-    ext_rad_num = ext_rad if ext_rad > 0 else 0 # A number to use to manipulate data, based on extraction radius
+    ext_rad_num = ext_rad if ext_rad != float('inf') else 0 # A number to use to manipulate data, based on extraction radius
 
     print(f"Using extraction radius {ext_rad if ext_rad >= 0 else radius_extraction} for {'strain' if strain_exists else 'psi_4'} data")
 
@@ -848,13 +884,13 @@ def main() -> None:
     # --- Minimum and Maximum Ell Mode Calculations ---
     ells = np.empty(0)
     # Convert extraction radius used into a properly formatted string ####.# to determine which files to search
-    if ext_rad >= 0:
+    if ext_rad != float('inf'):
         str_ext_rad = ("0" if ext_rad < 1000 else "") + str(ext_rad)
     else:
-        str_ext_rad = radius_extraction # If inf, use that
+        str_ext_rad = str(ext_rad) # If inf, use that
 
-    appropriate_bounds = (-10, -4) if ext_rad >= 0 else (-7, -4) # Appropriate bounds for which to look for extraction radius
-    appropriate_ell_idx = -13 if ext_rad >= 0 else -10
+    appropriate_bounds = (-10, -4) if ext_rad != float('inf') else (-7, -4) # Appropriate bounds for which to look for extraction radius
+    appropriate_ell_idx = -13 if ext_rad != float('inf') else -10
 
     for b in (strain_files if r_ext_in_strain else psi4_files):
         # Only search files with the appropriate extraction radius
@@ -901,6 +937,7 @@ def main() -> None:
     final_elevation_angle = 34   # Final camera elevation
     azi_angle = 45 # Default pi/4 azimuth camera angle
     FOV_angle = 30 # Default field of view angle
+    pip_xfraction = 0.8 # Fraction of corner of screen taken up by picture in picture view
 
     time1 = time.time() # End of initial setup
 
@@ -1024,19 +1061,10 @@ def main() -> None:
     bh1_rel_mass = bh1_avg_mass / bh_total_mass
     bh2_rel_mass = bh2_avg_mass / bh_total_mass
 
-    if bh1_avg_mass == 0 or bh2_avg_mass == 0:
-        print("Warning: Mean mass is zero pre-merger, using default masses from GW150914.")
-        # Keep default bh1_mass, bh2_mass
+    mass_ratio = bh1_rel_mass / bh2_rel_mass
 
-    else:
-        # Sets the second black hole as the more massive one if not already
-        if bh1_rel_mass > bh2_rel_mass:
-            bh1_rel_mass, bh2_rel_mass = bh2_rel_mass, bh1_rel_mass
-
-        mass_ratio = bh1_rel_mass / bh2_rel_mass
     # Extract BH coordinates (Check columns: 3=x, 4=y, assuming z=0 initially)
-    bh1_x0, bh1_y0 = bh_data[:, 3], bh_data[:, 4]
-    bh1_z0 = np.zeros_like(bh1_x0)  # Assume motion is in xy-plane
+    bh1_x0, bh1_y0, bh1_z0 = bh_data[:, 3], bh_data[:, 4], bh_data[:, 5]  # Assume motion is in xy-plane
 
     # Interpolate BH positions to the *strain* time array (equal_times)
     # Time array optimization: Use the actual strain time array for interpolation basis
@@ -1058,48 +1086,51 @@ def main() -> None:
         np.column_stack((bh1_x[post_slice], bh1_y[post_slice], bh1_z[post_slice])) # bh2 initially moves opposite bh1, but
                                                                                    # changes to following bh1 after merge
     ])
+
     bh2_x, bh2_y, bh2_z = bh2_coords.T  # Transpose and unpack
+
+    less_massive_x = bh1_x if bh1_rel_mass < bh2_rel_mass else bh2_x # Find x and y coordinates of less massive bh
+    less_massive_y = bh1_y if bh1_rel_mass < bh2_rel_mass else bh2_y # These will be the most "sweeping"
 
     print(f"Black hole mass ratio: {1/mass_ratio:.3f}:{1}")
 
     time3=time.time() # End of black hole position calculations
 
-    if STATUS_MESSAGES:
-        print(f"{'*' * 70}\nComputing horizon data...")
+    if APPARENT_HORIZONS:
+        if STATUS_MESSAGES:
+            print(f"{'*' * 70}\nComputing horizon data...")
 
-    horizon_dir = os.path.join(bh_dir, "horizons")
+        horizon_dir = os.path.join(bh_dir, "horizons")
 
-    try:
-        horizon_files = os.listdir(horizon_dir)
-    except FileNotFoundError:
-         raise FileNotFoundError(f"Black hole position file not found: {horizon_dir}")
-    except Exception as e:
-         raise RuntimeError(f"Error loading black hole data from {horizon_dir}: {e}")
-
-    horizon_files.sort()
-
-    horizon_times = np.empty(0)
-    horizon_names = {}
-    horizon_merge_time = -1
-
-    for file in horizon_files:
         try:
-            horizon_time = int(file[-14:-7])
-            time_string = str(float(horizon_time))
-            horizon_filepath = os.path.join(horizon_dir, file)
-            if file[-6:-3] == "ah3" and horizon_merge_time < 0:
-                horizon_merge_time = horizon_time # Note the time the black holes form a common horizon
-            horizon_times = np.unique(np.append(horizon_times, horizon_time)) # Try converting last part of filename to timestep number
-            if time_string in horizon_names:
-                horizon_names[time_string].append(horizon_filepath) # If it works, append the file name to the horizon_names
-            else:
-                horizon_names[time_string] = [horizon_filepath]
-        except ValueError: # If it's out of bounds or doesn't convert to a number, it's not a file we want
-            continue
-        except IndexError:
-            continue
+            horizon_files = os.listdir(horizon_dir)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Black hole position file not found: {horizon_dir}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading black hole data from {horizon_dir}: {e}")
 
-    position_to_horizon = horizon_merge_time / (merge_time + ext_rad_num)
+        horizon_files.sort()
+
+        horizon_times = np.empty(0)
+        horizon_names = {}
+        horizon_merge_time = -1
+
+        for file in horizon_files:
+            try:
+                horizon_time = int(file[-14:-7])
+                time_string = str(float(horizon_time))
+                horizon_filepath = os.path.join(horizon_dir, file)
+                if file[-6:-3] == "ah3" and horizon_merge_time < 0:
+                    horizon_merge_time = horizon_time # Note the time the black holes form a common horizon
+                horizon_times = np.unique(np.append(horizon_times, horizon_time)) # Try converting last part of filename to timestep number
+                if time_string in horizon_names:
+                    horizon_names[time_string].append(horizon_filepath) # If it works, append the file name to the horizon_names
+                else:
+                    horizon_names[time_string] = [horizon_filepath]
+            except (ValueError, IndexError): # If it's out of bounds or doesn't convert to a number, it's not a file we want
+                continue
+
+        position_to_horizon = horizon_merge_time / (merge_time + ext_rad_num)
 
     if STATUS_MESSAGES:
         print(f"{'*' * 70}\nComputing camera parameters...")
@@ -1119,7 +1150,9 @@ def main() -> None:
     larger_FOV, smaller_FOV = np.maximum(horz_FOV, vert_FOV), np.minimum(horz_FOV, vert_FOV)
 
     # Calculate appropriate display radius
-    magnitudes = np.sqrt(bh1_x**2 + bh1_y**2) # Get the distance between bh1 and the center (bh1 is less massive)
+    magnitudes = np.sqrt(less_massive_x**2 + less_massive_y**2) # Get the distance between bh1 and the center (bh1 is less massive)
+    bh_azis = np.unwrap(np.arctan2(less_massive_y, less_massive_x))
+
     init_elevation_rads = np.radians(initial_elevation_angle)
     fin_elevation_rads = np.radians(final_elevation_angle)
     # Calculate the appropriate starting zoom based on limiting camera parameters and black hole initial positions
@@ -1187,6 +1220,7 @@ def main() -> None:
     x_values = rv * np.cos(az)
     y_values = rv * np.sin(az)
 
+    print("Calculating spin-weighted spherical harmonics...")
     # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
     strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max).real
 
@@ -1201,30 +1235,36 @@ def main() -> None:
             f"{'*' * 70}\nCalculating cosmetic data..."
         )
 
+    orbit_start = find_idx(np.array(bh_azis), bh_azis[0] + (np.pi / 2 if bh_azis[0] < bh_azis[1] else np.pi / -2))
+    # If the array is 0 size, or if it only contains edge cases, set equal to last azi
+    if orbit_start[0] == bh_azis.size - 1:
+        orbit_start_idx = len(bh_azis) - 2
+    else:
+        orbit_start_idx = orbit_start[0]
+
+    orbit_end = find_idx(np.array(bh_azis), bh_azis[0] + (5 * np.pi / 2 if bh_azis[0] < bh_azis[1] else 5 * np.pi / -2))
+    if orbit_end[0] == bh_azis.size - 1:
+        orbit_end_idx = len(bh_azis) - 1
+    else:
+        orbit_end_idx = orbit_end[0]
+
     # Find radius of the center hole in the mesh (based on uninterpolated max separation + BH size)
     # Hole radius = factor * (max_separation + scaled radius of larger BH)
-    omitted_radius_length = magnitudes[0] + bh_scaling_factor * max(bh1_rel_mass, bh2_rel_mass) + 1
-    if omitted_radius_length > 25:
-        omitted_radius_length = 0 # Ensure that simulations where black holes are really far apart don't generate massive
-                                  # holes
+    omitted_radius_length = np.max(magnitudes[orbit_start_idx:orbit_end_idx]) + bh_scaling_factor * max(bh1_rel_mass, bh2_rel_mass) + 1
+    if omitted_radius_length > 100 and not TRAJECTORY_LINES:
+        omitted_radius_length = 5 # Ensure that simulations where black holes are really far apart don't generate massive
+                                  # holes, so long as trajectories aren't being tracked
+        print("WARNING: Black holes are spaced too far apart to generate proportional hole in mesh. Default hole will be used.")
 
     # Find point at which to taper off gravitational waves
     width = 0.5 * omitted_radius_length # Width of the transition region
     dropoff_radius = width + omitted_radius_length # Radius at which to start tapering beyond the hole
 
     # Find max amplitude scale factor allowable without impeding view of center hole (based on dropoff radius)
-    if omitted_radius_length == 0:
-        # If the black holes are very far apart, use default methods for calculating amplitude scale factor
-        # No fancy methods used, just making sure the waves aren't scaled too high by taking into account max strain
-        print("Warning: Black holes are spaced too far apart. No hole will be generated in the mesh. "
-              "Using default amplitude scaling.")
-        amplitude_scale_factor = 0.1 / np.max(strain_azi[0, :])
-        dropoff_2D_flat = np.full(len(radius_values), amplitude_scale_factor)
-    else:
-        # Apply amplitude scale factor calculation based on spin-weighted spherical harmonics max strain
-        amplitude_scale_factor = get_amplitude_scale_factor(np.sign(strain_azi) * np.log1p(np.abs(strain_azi)) if use_symlog else strain_azi, azimuth_values, omitted_radius_length, zoomout_distance, fin_elevation_rads, np.radians(azi_angle)) 
-        # Dropoff factor (smooth transition to zero amplitude near omitted hole), apply amplitude scale factor
-        dropoff_2D_flat = (0.5 + 0.5 * erf((radius_values - dropoff_radius)/width)).ravel() * amplitude_scale_factor
+    # Apply amplitude scale factor calculation based on spin-weighted spherical harmonics max strain
+    amplitude_scale_factor = get_amplitude_scale_factor(np.sign(strain_azi) * np.log1p(np.abs(strain_azi)) if use_symlog else strain_azi, azimuth_values, omitted_radius_length, zoomout_distance, fin_elevation_rads, np.radians(azi_angle)) 
+    # Dropoff factor (smooth transition to zero amplitude near omitted hole), apply amplitude scale factor
+    dropoff_2D_flat = (0.5 + 0.5 * erf((radius_values - dropoff_radius)/width)).ravel() * amplitude_scale_factor
 
     # Report calculated values
     print(f"Amplitude scale factor: {amplitude_scale_factor:.3f}")
@@ -1305,11 +1345,6 @@ def main() -> None:
             zoom_start - (time_indices - zoomout_idx) * 0.175
         ), zoomout_distance)
 
-    # Precompute merge rescale index
-    merge_condition = (valid_indices > merge_idx_equal) & (valid_indices < merge_idx_equal + save_rate)
-    merge_rescale_indices = np.where(merge_condition)[0]
-    merge_rescale_idx = merge_rescale_indices[0] if merge_rescale_indices.size > 0 else -1
-
     # Precompute percentage thresholds for progress report (based on simulation time)
     percentage_thresholds = np.round(np.linspace(0, n_times, 101)).astype(int)
 
@@ -1327,10 +1362,70 @@ def main() -> None:
     create_gw(engine, grid, gw_color, display_radius, wireframe)
 
     # Black Holes
-    # bh1 = create_sphere(engine, bh1_scaled_radius, bh_color)
-    # bh2 = create_sphere(engine, bh2_scaled_radius, bh_color)
-    bh1_source, bh1_mesh = plot_initial_mesh(engine, horizon_names["0.0"][0], bh_scaling_factor)
-    bh2_source, bh2_mesh = plot_initial_mesh(engine, horizon_names["0.0"][1], bh_scaling_factor)
+    if APPARENT_HORIZONS:
+        # Create source and mesh for black hole horizons
+        bh1_source, bh1 = plot_initial_mesh(engine, horizon_names["0.0"][0], bh_scaling_factor)
+        bh2_source, bh2 = plot_initial_mesh(engine, horizon_names["0.0"][1], bh_scaling_factor)
+    else:
+        bh1 = create_sphere(engine, bh1_scaled_radius, bh_color)
+        bh2 = create_sphere(engine, bh2_scaled_radius, bh_color)
+
+        # Precompute merge rescale index
+        merge_condition = (valid_indices > merge_idx_equal) & (valid_indices < merge_idx_equal + save_rate)
+        merge_rescale_indices = np.where(merge_condition)[0]
+        merge_rescale_idx = merge_rescale_indices[0] if merge_rescale_indices.size > 0 else -1
+
+    # Create trajectory tracking lines if needed
+    if TRAJECTORY_LINES:
+        bh1_trajectory = mlab.plot3d(bh1_x[0], bh1_y[0], bh1_z[0], figure=fig, tube_radius=0.1)
+        bh2_trajectory = mlab.plot3d(bh2_x[0], bh2_y[0], bh2_z[0], figure=fig, tube_radius=0.1)
+        bh1_trajectory.actor.property.opacity = 0.5 # Make them semi-transparent so they don't cover up black holes
+        bh2_trajectory.actor.property.opacity = 0.5
+
+    if PIP_VIEW: # For adding picture-in-picture view to MayaVi window
+        render_window = fig.scene.render_window # Get the main render window from the scene
+
+        inset_renderer = tvtk.Renderer() # Create a new renderer
+
+        # Set horizontal position and calculate vertical position to ensure view is square
+        inset_renderer.viewport = (pip_xfraction, 1 - aspect_ratio * (1 - pip_xfraction), 1.0, 1.0)
+        inset_renderer.background = (0.5, 0.5, 0.5) # Set a different bg color
+
+        render_window.add_renderer(inset_renderer) # Add render window to screen
+
+        inset_camera = inset_renderer.active_camera # Get the camera of the view
+        inset_camera.parallel_projection = True # Use an orthographic projection
+        inset_camera.parallel_scale = omitted_radius_length # Set the camera to view entire omitted radius
+        inset_camera.focal_point = (0, 0, 0) # Look at the center
+        inset_camera.position = (0, 0, 15) # Position the camera along z-axis
+
+        # Add bh horizons to this new view
+        inset_renderer.add_actor(bh1.actor.actor)
+        inset_renderer.add_actor(bh2.actor.actor)
+
+        if TRAJECTORY_LINES:
+            # If trajectory lines are enabled, add those too
+            inset_renderer.add_actor(bh1_trajectory.actor.actor)
+            inset_renderer.add_actor(bh2_trajectory.actor.actor)
+
+    if FREQ_SOUND:
+        # Get hilbert transform of sample strain slice at rad 0, azi 0, to get instantaneous waveform frequency
+        analytic_signal = hilbert(strain_to_mesh[0, 0, :])
+
+        # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
+        instantaneous_phase = np.unwrap(np.angle(analytic_signal))
+
+        # Derivative of phase is angular frequency, divide by 2 * pi
+        # to get angular frequency in cycles per sample (time_idx)
+        sample_freq = np.gradient(instantaneous_phase) / (2 * np.pi)
+
+        freq_scaling = 10000 / np.max(sample_freq) # Scales max frequency up to 10000 Hz
+        audio_path = f"{movie_path}_audio.wav" # Setup path for audio file
+        movie_with_audio = f"{movie_path}_sound.mp4"
+
+        # Ensure only frequencies for saved frames are considered
+        all_frame_frequencies = sample_freq[valid_indices] * freq_scaling
+
     # Initialize timing and progress tracking
     start_time = time.time()
 
@@ -1350,92 +1445,171 @@ def main() -> None:
     # Use @mlab.animate decorator for potential interactive use,
     # but run it directly for offscreen rendering.
     #@mlab.animate(delay=10, ui=True)
+
     def anim():
-        """Generator function to drive the animation frame by frame."""
+        """
+        Generator function to drive the animation frame by frame,
+        generate corresponding audio, and merge them.
+        """
         current_percent = 0
 
-        writer = imageio.get_writer(movie_path_name, fps=frames_per_second, codec="libx264", quality=8)
-        for idx, time_idx in enumerate(valid_indices):
-            # --- Status Update & ETA ---
-            if idx == 10: # Estimate after 10 frames
-                end_time = time.time()
-                eta = (end_time - start_time) * n_frames / 10
-                print(
-                    f"""\nCreating {n_frames} frames and saving them to:
-{movie_file_path}\nEstimated time: {dhms_time(eta)}"""
+        print(f"Starting video frame generation for: {movie_path_name}")
+
+        with imageio.get_writer(movie_path_name, fps=frames_per_second, codec="libx264", quality=8) as writer:
+            for idx, time_idx in enumerate(valid_indices):
+                # --- Status Update & ETA ---
+                if idx == 10: # Estimate after 10 frames
+                    end_time = time.time()
+                    eta = (end_time - start_time) * n_frames / 10
+                    print(
+                        f"""\nCreating {n_frames} frames and saving them to:
+{movie_path_name}\nEstimated time: {dhms_time(eta)}"""  # <-- MODIFIED: Show silent path
+                    )
+
+                # Update progress percent
+                if STATUS_MESSAGES and time_idx !=0 and current_percent < len(percentage_thresholds) and time_idx > percentage_thresholds[current_percent]:
+                    eta = ((time.time() - start_time) / time_idx) * (n_times - time_idx)
+                    print(f"\r{int(time_idx * 100 / n_times)}% done, {dhms_time(eta)} remaining", end="", flush=True)
+                    current_percent +=1
+
+                # --- Update Scene Objects ---
+                if APPARENT_HORIZONS:
+                    horizon_idx = find_idx(horizon_times, position_to_horizon * (equal_times[time_idx] + ext_rad_num))[0]
+                    update_mesh_data(bh1_source, horizon_names[str(horizon_times[horizon_idx])][0], bh_scaling_factor)
+                    try:
+                        update_mesh_data(bh2_source, horizon_names[str(horizon_times[horizon_idx])][1], bh_scaling_factor)
+                    except IndexError:
+                        try:
+                            bh2_mesh.visible = False
+                        except ValueError:
+                            pass
+                else:
+                    bh1.actor.actor.position = bh1_x[time_idx], bh1_y[time_idx], bh1_z[time_idx] # Update first bh position
+                    bh2.actor.actor.position = bh2_x[time_idx], bh2_y[time_idx], bh2_z[time_idx] # Update second bh position
+                    # Rescale bh2 if black holes have merged to represent combined object (at the specific frame index)
+                    if idx == merge_rescale_idx:
+                        # For a sphere, equally scale in all directions
+                        bh2.actor.actor.scale = bh_merged_radius, bh_merged_radius, bh_merged_radius
+
+                if TRAJECTORY_LINES and time_idx > 0:
+                    bh1_trajectory.mlab_source.reset(x=bh1_x[:time_idx], y=bh1_y[:time_idx], z=bh1_z[:time_idx])
+                    bh2_trajectory.mlab_source.reset(x=bh2_x[:time_idx], y=bh2_y[:time_idx], z=bh2_z[:time_idx])
+
+                strain_slice = strain_to_mesh[..., time_idx].ravel() 
+                np_points[:, 2] = np.where(valid_mask, strain_slice, np.nan)
+                vtk_array.modified()
+                strain_array.from_array(strain_slice[valid_mask])
+                grid._set_points(points)
+                grid.modified()
+
+                # --- Update Camera ---
+                mlab.view(
+                    azimuth=azi_angle,
+                    elevation=elevations[time_idx], 
+                    distance=distances[time_idx], 
+                    focalpoint=(0, 0, 0) 
                 )
 
-            # Update progress percent
-            if STATUS_MESSAGES and time_idx !=0 and current_percent < len(percentage_thresholds) and time_idx > percentage_thresholds[current_percent]:
-                eta = ((time.time() - start_time) / time_idx) * (n_times - time_idx)
-                print(f"\r{int(time_idx  * 100 / n_times)}% done, {dhms_time(eta)} remaining", end="", flush=True)
-                current_percent +=1
+                # --- Save Frame --
+                frame = mlab.screenshot(antialiased=True) 
+                imageio.imwrite(frame_filenames[idx], frame)
 
-            # --- Update Scene Objects ---
-            # Rescale bh2 if black holes have merged to represent combined object (at the specific frame index)
-            # if idx == merge_rescale_idx:
-                # For a sphere, equally scale in all directions
-                # bh2.actor.actor.scale = bh_merged_radius, bh_merged_radius, bh_merged_radius
-
-            # Update black hole positions using interpolated data for the current simulation time index
-            horizon_idx = find_idx(horizon_times, position_to_horizon * (equal_times[time_idx] + ext_rad_num))[0]
-            update_mesh_data(bh1_source, horizon_names[str(horizon_times[horizon_idx])][0], bh_scaling_factor)
-
-            try:
-                update_mesh_data(bh2_source, horizon_names[str(horizon_times[horizon_idx])][1], bh_scaling_factor)
-            except IndexError:
+                # --- Append Frame to Movie ---
                 try:
-                    bh2_mesh.remove() # Probably merged already, can remove
-                except ValueError:
-                    pass
+                    writer.append_data(frame) # Write scene to movie
+                except Exception as e:
+                    print(f"\nError saving frame {frame_filenames[idx]} to movie: {e}")
 
-            # bh1.actor.actor.position = bh1_x[time_idx], bh1_y[time_idx], bh1_z[time_idx] # Update first bh position
-            # bh2.actor.actor.position = bh2_x[time_idx], bh2_y[time_idx], bh2_z[time_idx] # Update second bh position
-
-            # Update Mesh Z-coordinates (Strain Visualization)
-            # Get the strain slice for the current *simulation time index*
-            strain_slice = strain_to_mesh[..., time_idx].ravel() # Flatten (n_rad, n_azi) -> (n_points)
-
-            # Apply masking: set Z to NaN for points inside the hole
-            np_points[:, 2] = np.where(valid_mask, strain_slice, np.nan)
-
-            # Notify VTK that the points data has changed
-            vtk_array.modified()
-
-            # Update grid source
-            strain_array.from_array(strain_slice[valid_mask])
-            grid._set_points(points)
-            grid.modified()
-
-            # --- Update Camera ---
-            mlab.view(
-                azimuth=azi_angle,
-                elevation=elevations[time_idx], # Use precomputed elevation for this frame
-                distance=distances[time_idx], # Use precomputed distance for this frame
-                focalpoint=(0, 0, 0) # Keep focused on the origin
-            )
-
-            # --- Save Frame --
-            frame = mlab.screenshot(antialiased=True) # Take a screenshot of the current scene
-            imageio.imwrite(frame_filenames[idx], frame)
-
-            # --- Append Frame to Movie ---
-            try:
-                writer.append_data(frame) # Write scene to movie
-            except Exception as e:
-                print(f"\nError saving frame {frame_filenames[idx]} to movie: {e}")
-
-            # yield # Yield control for the @mlab.animate decorator (if used interactively)
+        # --- End of frame loop and 'with' block ---
+        print("\nVideo frame generation complete.")
 
         # --- End of Loop ---
-        writer.close()
         mlab.close(all=True) # Close the Mayavi figure/engine
         total_time = time.time() - start_time
         print("\nDone", flush=True) # Newline after progress bar
+
+        if FREQ_SOUND:
+            print(f"Generating audio file: {audio_path}...")
+
+            audio_sample_rate = 44100  # Standard audio sample rate (Hz)
+
+            # Calculate how many audio samples we need for each video frame
+            samples_per_frame = int(audio_sample_rate / frames_per_second)
+
+            full_waveform = [] # Full waveform array
+            current_phase = 0.0 # Phase tracker to ensure soundwave continuity
+
+            for f in all_frame_frequencies:
+                f = max(0, f) # Ensure frequency is non-negative
+
+                # Calculate phase increment per sample
+                phase_increment = (2 * np.pi * f) / audio_sample_rate
+
+                # Create an array of sample indices for this frame (0, 1, 2, ... N)
+                t_samples = np.arange(samples_per_frame)
+
+                # Calculate the phases for this frame
+                frame_phases = current_phase + t_samples * phase_increment
+
+                # Generate the sine wave for this chunk
+                wave_chunk = 0.5 * np.sin(frame_phases)
+                full_waveform.append(wave_chunk)
+
+                # Update the current phase for the next waveform, wrapped
+                current_phase = (frame_phases[-1] + phase_increment) % (2 * np.pi)
+
+            # Concatenate all frame waveforms into one long array
+            final_waveform = np.concatenate(full_waveform).astype(np.float32)
+
+            # Scale to 16-bit integer (range -32767 to 32767) for the .wav file
+            scaled_waveform = np.int16(final_waveform * 32767)
+
+            try:
+                # Write the .wav file
+                write_wav(audio_path, audio_sample_rate, strain_to_mesh[0, 0, :] * 32767 * freq_scaling)
+                print("Audio generation complete.")
+            except Exception as e:
+                print(f"\nAn error occurred during audio generation: {e}")
+                print("Skipping audio merging.")
+                return # Exit if audio failed
+
+            # --- Merge Video and Audio ---
+            print(f"Merging video and audio...")
+            try:
+                # Setup video clip and audio clip
+                video_clip = VideoFileClip(movie_path_name)
+                audio_clip = AudioFileClip(audio_path)
+
+                # Set the audio of the video clip, with durations equal
+                final_clip = video_clip.with_audio(audio_clip.with_duration(video_clip.duration))
+
+                # Write the final file
+                final_clip.write_videofile(
+                    movie_with_audio,
+                    fps=frames_per_second,
+                    codec="libx264",
+                    audio_codec="aac",  # Common audio codec for mp4
+                    logger='bar'        # Show a progress bar
+                )
+
+                final_clip.close()
+                video_clip.close()
+                audio_clip.close()
+
+                # Clean up temporary files
+                os.remove(audio_path)
+                os.remove(movie_path_name)
+
+            except Exception as e:
+                 print(f"\nAn error occurred during merging: {e}")
+                 print("Please check your 'moviepy' and 'ffmpeg' installation.")
+                 print(f"Your silent video is at: {movie_path_name}")
+                 print(f"Your audio file is at: {audio_path}")
+
         # Use f-strings for final messages
         print(
             f"\nSaved {n_frames} frames to {movie_file_path} in {dhms_time(total_time)}.")
-        print(f"Movie saved to {movie_file_path}/{movie_dir_name}.mp4")
+        print(f"Movie saved to {movie_with_audio if FREQ_SOUND else movie_path_name}")
         sys.exit(0)
 
     # Run the animation script
@@ -1485,7 +1659,6 @@ All {p4s_results.attempted} test(s) passed"""
     except (RuntimeError, FileNotFoundError, ValueError, IndexError) as e:
         # Catch expected errors from main() and print cleanly
         print(f"\nExecution failed: {e}", file=sys.stderr)
-        traceback.print_exc()
         sys.exit(1)
     except Exception as e:
          # Catch unexpected errors
