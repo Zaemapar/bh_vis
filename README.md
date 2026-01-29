@@ -44,26 +44,23 @@ pip install mayavi --no-build-isolation
 
 To use these scripts with your own data, take a look at [this brief explanation](jupyter_notebooks/Tutorial-Compatible_Data_Formats.ipynb) of compatible data formats, along with instructions to prepare your data.
 
-## Creating a Movie From Your Own Data
+## Creating a Movie
 
-To create a movie using your own merger data, first ensure it is packaged in a folder in the format specified:
-<ul> 
-     <li>Files containing psi 4 data for your specified extraction radius and ell modes
-          <ul>
-               <li>Psi 4 files must be named "Rpsi4_l{ell}-r{extraction_radius}.txt"</li>
-               <li>All values of ell must be consecutive</li>
-               <li>extraction_radius must be a one-decimal float preceded by a 0 if less than 1000</li>
-          </ul>
-     </li>
-     <li>One file containing position data for the black holes named "puncture_posns_vels_regridxyzU.txt"</li>
-</ul>
-When your data is formatted properly, run the following command inside the "scripts" directory:
+To create a movie, you first need a folder in the `data` subdirectory containing the waveform and position data for the merger you would like to visualize. You can acquire sample data from various databases using their respective processing scripts in the `scripts` subdirectory.
 
-```
-python3 animation_main.py {path_to_folder} {optional: use_symlog}
-```
+To load data from the [SXS database](https://data.black-holes.org/simulations/index.html), navigate to the `scripts` subdirectory from the `bh_vis` directory with `cd scripts`. Run the processing script with `python3 load_data_sxs.py <SIMULATION_NAME>` (if on Linux) to extract the data from that simulation. Note that SXS binary black hole simulations are usually named in the form SXS:BBH:####, where #### is the simulation number. A full list of simulations can be found on the SXS database.
 
-Use_symlog is a boolean and is False by default if not specified. Setting use_symlog to True will apply a signed logarithm scaling to the data. This may be useful if there is a large difference between the magnitudes of the gravitational waves from when the black holes start to orbit to the point when they merge.
+Once you have your data in the data subdirectory, you can then run the animation script from the scripts folder. To start the visualization creation, navigate to the scripts directory and run `python3 animation_main.py <SIMULATION_NAME>`. The script `animation_main.py` searches the `data` subdirectory for a folder with the simulation name and loads that data, so only the name is needed.
+
+If the visualization process is successful, a movie will be output to `data/<SIMULATION_NAME>/movies/real_movie#`.
+
+### Using Your Own Data
+To use your own data, first ensure it is packaged in a folder named with the desired simulation name in the `data` subdirectory in the format specified: 
+* Either a `psi4` or a `strain` folder containing waveform data for your specified extraction radius and ell modes.
+     * Psi 4 files must be named `Rpsi4_l<ELL>-r<EXTRACTION_RADIUS>.txt`. Strain files must be named `Rh_l<ELL>-r<EXTRACTION_RADIUS>.txt`.
+     * All values of ell must be consecutive.
+     * `extraction_radius` must be a one-decimal float preceded by a 0 if less than 1000. If you want to use an infinite extraction radius, use `inf`.
+* A `puncture` folder containing position data for the black holes named `puncture_posns_vels_regridxyzU.txt`
 
 ## Troubleshooting  `animation_main.py`
 Depending on your system, Mayavi might require some adjustments in order to properly render. To fix the Linux graphics issue with `libstdcxx` and `OpenGL` rendering, try installing the dependencies through conda:
