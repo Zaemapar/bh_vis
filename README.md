@@ -28,7 +28,7 @@ cd bh_vis
 Python -m venv .venv
 .venv/scripts/Activate.ps1
 pip install -r requirements.txt
-pip install mayavi --no-build-isolation
+pip install mayavi==4.8.3 --no-build-isolation
 ```
 
 #### UNIX/OSX
@@ -39,7 +39,7 @@ cd bh_vis
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install mayavi --no-build-isolation
+pip install mayavi==4.8.3 --no-build-isolation
 ```
 
 To use these scripts with your own data, take a look at [this brief explanation](jupyter_notebooks/Tutorial-Compatible_Data_Formats.ipynb) of compatible data formats, along with instructions to prepare your data.
