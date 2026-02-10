@@ -29,6 +29,7 @@ from scipy.special import erf  # Vectorized error function for arrays
 from scipy.integrate import quad
 from scipy.spatial import ConvexHull
 from scipy.signal import hilbert
+from scipy.signal import resample
 import quaternionic
 import spherical
 import imageio.v2 as imageio
@@ -44,7 +45,6 @@ import psi4_FFI_to_strain as psi4strain
 import traceback
 from scipy.io.wavfile import write as write_wav
 from moviepy import VideoFileClip, AudioFileClip
-import matplotlib.pyplot as plt
 
 # Default parameters used when USE_SYS_ARGS is False
 BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
@@ -52,12 +52,14 @@ MOVIE_DIR = "../data/GW150914_data/movies" # changeable with sys arguments
 S_MODE = -2
 EXT_RAD = 100 # changeable with sys arguments
 
-def plt_data(arr):
-    plt.plot(np.linspace(0, len(arr), len(arr)), arr)
-    plt.grid(True)
-    plt.show()
-
-def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128], ell_min: int, ell_max: int, status_messages=True) -> NDArray[np.complex128]:
+def swsh_summation_angles(
+    colat: float,
+    azi: NDArray[np.float64],
+    mode_data: NDArray[np.complex128],
+    ell_min: int,
+    ell_max: int,
+    status_messages=True
+) -> NDArray[np.complex128]:
     """
     Sum all the strain modes after factoring in the
     corresponding spin-weighted spherical harmonic
@@ -783,7 +785,8 @@ def main() -> None:
                 continue # Continue if no clear permission was given
 
             # User confirmed overwrite
-            print(f"Overwriting existing files in {movie_file_path}...")
+            if STATUS_MESSAGES:
+                print(f"Overwriting existing files in {movie_file_path}...")
             try:
                 # Clear existing files if user confirms overwrite
                 for file in os.listdir(movie_file_path):
@@ -873,7 +876,8 @@ def main() -> None:
 
     ext_rad_num = ext_rad if ext_rad != float('inf') else 0 # A number to use to manipulate data, based on extraction radius
 
-    print(f"Using extraction radius {ext_rad if ext_rad >= 0 else radius_extraction} for {'strain' if strain_exists else 'psi_4'} data")
+    if STATUS_MESSAGES:
+        print(f"Using extraction radius {ext_rad if ext_rad >= 0 else radius_extraction} for {'strain' if strain_exists else 'psi_4'} data")
 
     # Check to see which directory houses the appropriate ext_rad
     r_ext_in_strain = False
@@ -918,7 +922,8 @@ def main() -> None:
     if gaps[0].size > 0:
         raise RuntimeError(f"A gap was detected in the l modes: Minimum l is {ell_min}, maximum l is {ell_max}, but no l={gaps[0][0] + ell_min + 1} file was found")
 
-    print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for {'strain' if strain_exists else 'psi_4'} data")
+    if STATUS_MESSAGES:
+        print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for {'strain' if strain_exists else 'psi_4'} data")
 
     # --- Simulation & Visualization Parameters ---
     n_rad_pts = 450       # number of points along the radius
@@ -951,7 +956,8 @@ def main() -> None:
         time_array_set = False
         mode_data_set = False
 
-        print(f"Using existing strain data files in {strain_dir}")
+        if STATUS_MESSAGES:
+            print(f"Using existing strain data files in {strain_dir}")
 
         # Iterate through each l mode and extract the appropriate strain data 
         files_processed = 0
@@ -1018,7 +1024,9 @@ def main() -> None:
     if n_times == 0:
         raise ValueError(f"Loaded time array is empty. Cannot proceed.")
     n_frames = int(n_times / save_rate)
-    print(f"Loaded {mode_data.shape[0]} modes over {n_times} time steps.")
+
+    if STATUS_MESSAGES:
+        print(f"Loaded {mode_data.shape[0]} modes over {n_times} time steps.")
 
     time2=time.time() # End of strain conversion
 
@@ -1092,7 +1100,9 @@ def main() -> None:
     less_massive_x = bh1_x if bh1_rel_mass < bh2_rel_mass else bh2_x # Find x and y coordinates of less massive bh
     less_massive_y = bh1_y if bh1_rel_mass < bh2_rel_mass else bh2_y # These will be the most "sweeping"
 
-    print(f"Black hole mass ratio: {1/mass_ratio:.3f}:{1}")
+    if STATUS_MESSAGES:
+        disp_mass_ratio = mass_ratio if mass_ratio >= 1 else 1 / mass_ratio # First bh should always be >=1 in the ratio
+        print(f"Black hole mass ratio: {disp_mass_ratio:.3f}:{1}")
 
     time3=time.time() # End of black hole position calculations
 
@@ -1132,6 +1142,8 @@ def main() -> None:
 
         position_to_horizon = horizon_merge_time / (merge_time + ext_rad_num)
 
+    timeh = time.time()
+
     if STATUS_MESSAGES:
         print(f"{'*' * 70}\nComputing camera parameters...")
 
@@ -1159,7 +1171,8 @@ def main() -> None:
     zoom_start = np.maximum(80, magnitudes[0] * np.sin((np.pi - smaller_FOV) / 2 + fin_elevation_rads) \
                  / np.sin(smaller_FOV / 2))
 
-    print(f"Starting zoom: {zoom_start}")
+    if STATUS_MESSAGES:
+        print(f"Starting zoom: {zoom_start} (Default is 80)")
 
     time4 = time.time() # End of camera parameter calculations
 
@@ -1173,7 +1186,9 @@ def main() -> None:
                         / (np.cos(init_elevation_rads + larger_FOV / 2) * np.cos(init_elevation_rads)), \
                         zoom_start * np.cos(init_elevation_rads) * np.tan(larger_FOV / 2))
     display_radius = np.maximum(300, start_view_radius) # Ensures the display radius is, at a minimum, 300
-    print(f"Display radius: {display_radius}")
+
+    if STATUS_MESSAGES:
+        print(f"Display radius: {display_radius} (Default is 300)")
 
     # Defining a shifted error function, rising sharply after the default display radius. This will be used to determine
     # how much to add to the distance between each radius point on the mesh grid. Points outside the default display
@@ -1185,7 +1200,8 @@ def main() -> None:
     available_memory = psutil.virtual_memory().available - 1000000000 # Get the available memory, with a significant buffer
     # Calculate the number of radius points. Default is 350, then as many additional points are added as memory will allow.
     max_rads = 350 + int((available_memory) / (n_times * n_azi_pts * float64size))
-    print(f"Maximum radius points: {max_rads}")
+    if STATUS_MESSAGES:
+        print(f"Maximum radius points: {max_rads} (Allocated from memory, default is 350)")
 
     # Calculate by what factor the shifted error function should be scaled vertically
     resolution_dropoff_factor = (display_radius - 300) / (2 * (max_rads - 450)) - 1 / 3
@@ -1220,9 +1236,11 @@ def main() -> None:
     x_values = rv * np.cos(az)
     y_values = rv * np.sin(az)
 
-    print("Calculating spin-weighted spherical harmonics...")
+    if STATUS_MESSAGES:
+         print("Calculating spin-weighted spherical harmonics...")
+
     # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
-    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max).real
+    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max, STATUS_MESSAGES).real
 
     # Broadcasts equal_times and radius_values together to create a 2D array (n_radii, n_times) that shows the retarded
     # time at each radius, plus the extraction radius
@@ -1254,7 +1272,8 @@ def main() -> None:
     if omitted_radius_length > 100 and not TRAJECTORY_LINES:
         omitted_radius_length = 5 # Ensure that simulations where black holes are really far apart don't generate massive
                                   # holes, so long as trajectories aren't being tracked
-        print("WARNING: Black holes are spaced too far apart to generate proportional hole in mesh. Default hole will be used.")
+        if STATUS_MESSAGES:
+            print("WARNING: Black holes are spaced too far apart to generate proportional hole in mesh. Default hole will be used.")
 
     # Find point at which to taper off gravitational waves
     width = 0.5 * omitted_radius_length # Width of the transition region
@@ -1267,7 +1286,8 @@ def main() -> None:
     dropoff_2D_flat = (0.5 + 0.5 * erf((radius_values - dropoff_radius)/width)).ravel() * amplitude_scale_factor
 
     # Report calculated values
-    print(f"Amplitude scale factor: {amplitude_scale_factor:.3f}")
+    if STATUS_MESSAGES:
+        print(f"Amplitude scale factor: {amplitude_scale_factor:.3f}")
 
     # Zoom out a quarter of the way through the data
     zoomout_time = (equal_times[-1] - equal_times[0]) / 4
@@ -1408,38 +1428,23 @@ def main() -> None:
             inset_renderer.add_actor(bh1_trajectory.actor.actor)
             inset_renderer.add_actor(bh2_trajectory.actor.actor)
 
-    if FREQ_SOUND:
-        # Get hilbert transform of sample strain slice at rad 0, azi 0, to get instantaneous waveform frequency
-        analytic_signal = hilbert(strain_to_mesh[0, 0, :])
-
-        # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
-        instantaneous_phase = np.unwrap(np.angle(analytic_signal))
-
-        # Derivative of phase is angular frequency, divide by 2 * pi
-        # to get angular frequency in cycles per sample (time_idx)
-        sample_freq = np.gradient(instantaneous_phase) / (2 * np.pi)
-
-        freq_scaling = 10000 / np.max(sample_freq) # Scales max frequency up to 10000 Hz
-        audio_path = f"{movie_path}_audio.wav" # Setup path for audio file
-        movie_with_audio = f"{movie_path}_sound.mp4"
-
-        # Ensure only frequencies for saved frames are considered
-        all_frame_frequencies = sample_freq[valid_indices] * freq_scaling
-
     # Initialize timing and progress tracking
     start_time = time.time()
 
     # Report setup times - Use f-strings
-    print(f"Timing Report (seconds):")
-    print(f"  Parameter & Movie Setup: {time1 - time0:.3f}")
-    print(f"  Psi 4 Conversion/Strain Load: {time2 - time1:.3f}")
-    print(f"  BH Trajectories: {time3 - time2:.3f}")
-    print(f"  Camera Parameters: {time4 - time3:.3f}")
-    print(f"  Grid Init: {time5 - time4:.3f}")
-    print(f"  Cosmetic Calcs: {time6 - time5:.3f}")
-    print(f"  Mesh Construction: {time7 - time6:.3f}")
-    print(f"  Animation Setup: {start_time - time7:.3f}")
-    print(f"  Total Setup Time: {start_time - time0:.3f}")
+    if STATUS_MESSAGES:
+        print(f"Timing Report (seconds):")
+        print(f"  Parameter & Movie Setup: {time1 - time0:.3f}")
+        print(f"  Psi 4 Conversion/Strain Load: {time2 - time1:.3f}")
+        print(f"  BH Trajectories: {time3 - time2:.3f}")
+        if APPARENT_HORIZONS:
+            print(f"Apparent Horizon Load: {timeh - time3:.3f}")
+        print(f"  Camera Parameters: {time4 - (timeh if APPARENT_HORIZONS else time3):.3f}")
+        print(f"  Grid Init: {time5 - time4:.3f}")
+        print(f"  Cosmetic Calcs: {time6 - time5:.3f}")
+        print(f"  Mesh Construction: {time7 - time6:.3f}")
+        print(f"  Animation Setup: {start_time - time7:.3f}")
+        print(f"  Total Setup Time: {start_time - time0:.3f}")
 
     # --- Animation Loop ---
     # Use @mlab.animate decorator for potential interactive use,
@@ -1453,7 +1458,8 @@ def main() -> None:
         """
         current_percent = 0
 
-        print(f"Starting video frame generation for: {movie_path_name}")
+        if STATUS_MESSAGES:
+            print(f"Starting video frame generation for: {movie_path_name}")
 
         with imageio.get_writer(movie_path_name, fps=frames_per_second, codec="libx264", quality=8) as writer:
             for idx, time_idx in enumerate(valid_indices):
@@ -1525,96 +1531,151 @@ def main() -> None:
 
         # --- End of Loop ---
         mlab.close(all=True) # Close the Mayavi figure/engine
-        total_time = time.time() - start_time
         print("\nDone", flush=True) # Newline after progress bar
-
-        if FREQ_SOUND:
-            print(f"Generating audio file: {audio_path}...")
-
-            audio_sample_rate = 44100  # Standard audio sample rate (Hz)
-
-            # Calculate how many audio samples we need for each video frame
-            samples_per_frame = int(audio_sample_rate / frames_per_second)
-
-            full_waveform = [] # Full waveform array
-            current_phase = 0.0 # Phase tracker to ensure soundwave continuity
-
-            for f in all_frame_frequencies:
-                f = max(0, f) # Ensure frequency is non-negative
-
-                # Calculate phase increment per sample
-                phase_increment = (2 * np.pi * f) / audio_sample_rate
-
-                # Create an array of sample indices for this frame (0, 1, 2, ... N)
-                t_samples = np.arange(samples_per_frame)
-
-                # Calculate the phases for this frame
-                frame_phases = current_phase + t_samples * phase_increment
-
-                # Generate the sine wave for this chunk
-                wave_chunk = 0.5 * np.sin(frame_phases)
-                full_waveform.append(wave_chunk)
-
-                # Update the current phase for the next waveform, wrapped
-                current_phase = (frame_phases[-1] + phase_increment) % (2 * np.pi)
-
-            # Concatenate all frame waveforms into one long array
-            final_waveform = np.concatenate(full_waveform).astype(np.float32)
-
-            # Scale to 16-bit integer (range -32767 to 32767) for the .wav file
-            scaled_waveform = np.int16(final_waveform * 32767)
-
-            try:
-                # Write the .wav file
-                write_wav(audio_path, audio_sample_rate, strain_to_mesh[0, 0, :] * 32767 * freq_scaling)
-                print("Audio generation complete.")
-            except Exception as e:
-                print(f"\nAn error occurred during audio generation: {e}")
-                print("Skipping audio merging.")
-                return # Exit if audio failed
-
-            # --- Merge Video and Audio ---
-            print(f"Merging video and audio...")
-            try:
-                # Setup video clip and audio clip
-                video_clip = VideoFileClip(movie_path_name)
-                audio_clip = AudioFileClip(audio_path)
-
-                # Set the audio of the video clip, with durations equal
-                final_clip = video_clip.with_audio(audio_clip.with_duration(video_clip.duration))
-
-                # Write the final file
-                final_clip.write_videofile(
-                    movie_with_audio,
-                    fps=frames_per_second,
-                    codec="libx264",
-                    audio_codec="aac",  # Common audio codec for mp4
-                    logger='bar'        # Show a progress bar
-                )
-
-                final_clip.close()
-                video_clip.close()
-                audio_clip.close()
-
-                # Clean up temporary files
-                os.remove(audio_path)
-                os.remove(movie_path_name)
-
-            except Exception as e:
-                 print(f"\nAn error occurred during merging: {e}")
-                 print("Please check your 'moviepy' and 'ffmpeg' installation.")
-                 print(f"Your silent video is at: {movie_path_name}")
-                 print(f"Your audio file is at: {audio_path}")
-
-        # Use f-strings for final messages
-        print(
-            f"\nSaved {n_frames} frames to {movie_file_path} in {dhms_time(total_time)}.")
-        print(f"Movie saved to {movie_with_audio if FREQ_SOUND else movie_path_name}")
-        sys.exit(0)
 
     # Run the animation script
     _ = anim()
     mlab.show()
+
+    # --- Generate audio file (if requested) ---
+
+    if FREQ_SOUND:
+
+        # Calculate sample rate with inverse of timestep
+        movie_length = n_valid / frames_per_second
+        dt = 1 / frames_per_second
+        target_rate = 48000
+
+        # Normalize Strain Data (Safety check) - Remove DC offset and normalize to avoid numerical issues during Hilbert
+        sound_strain = strain_to_mesh[0, 0, :][valid_indices]
+        sound_strain = sound_strain - np.mean(sound_strain)
+
+        # Normalize strain data
+        if np.max(np.abs(sound_strain)) > 0:
+             sound_strain = sound_strain / np.max(np.abs(sound_strain))
+
+        # We pad with a reflection of the data to maintain continuity.
+        # 10% padding on each side is usually sufficient.
+        pad_length = int(n_valid * 0.1)
+        sound_strain_padded = np.pad(sound_strain, (pad_length, pad_length), mode='reflect')
+        pad_movie_length = 1.2 * movie_length
+
+        # Extract Instantaneous Properties using the Hilbert Transform
+        # Separate envelope and phase can be extracted from analytic signal
+        analytic_signal = hilbert(sound_strain_padded)
+
+        # Extract Amplitude Envelope
+        amplitude_envelope = np.abs(analytic_signal)
+
+        # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
+        instantaneous_phase = np.unwrap(np.angle(analytic_signal))
+
+        # Derivative of phase is angular frequency, divide by 2 * pi
+        # to get angular frequency in cycles per sample (time_idx)
+        instantaneous_freq = np.gradient(instantaneous_phase) * frames_per_second / (2 * np.pi)
+
+        # Scale freq based on the valid region
+        valid_freqs = instantaneous_freq[pad_length:-pad_length]
+        freq_scaling = 8000 / np.max(valid_freqs) # Scales up to 10000 Hz, a relatively high note
+
+        # Ensure only frequencies for saved frames are considered
+        audio_freq = instantaneous_freq * freq_scaling
+
+        # Clamp negative frequencies (can happen due to noise/numerical artifacts)
+        audio_freq = np.maximum(audio_freq, 0)
+
+        # Calculate target samples including the padding
+        num_audio_samples_padded = int(pad_movie_length * target_rate)
+
+        # Resample to fit the required audio bitrate & movie length
+        audio_freq_upsampled = resample(audio_freq, num_audio_samples_padded)
+        amplitude_upsampled = resample(amplitude_envelope, num_audio_samples_padded)
+
+        # Synthesize the Sound Wave
+        # Must integrate frequency to get the new phase, Phase_new = Cumulative Sum of (Frequency * Time_Step * 2pi)
+        dt_audio = 1 / target_rate
+        new_phase = np.cumsum(audio_freq_upsampled * dt_audio * 2.0 * np.pi)
+
+        # Generate the new audio signal: Amplitude * sin(Phase), and slice only for valid indices
+        raw_audio_padded = amplitude_upsampled * np.sin(new_phase)
+
+        # We need to map the original pad_length (in input samples) to output samples
+        pad_length_audio = int(1 / 12 * num_audio_samples_padded)
+
+        # Slice the center, removing the edge artifacts
+        audio_resampled = raw_audio_padded[pad_length_audio : -pad_length_audio]
+
+        # Even with padding, a hard start/stop can cause a "click".
+        # Apply a 50ms fade in/out.
+        fade_len = int(0.05 * target_rate) # 50ms
+        if len(audio_resampled) > 2 * fade_len:
+            fade_in = np.linspace(0, 1, fade_len)
+            fade_out = np.linspace(1, 0, fade_len)
+            audio_resampled[:fade_len] *= fade_in
+            audio_resampled[-fade_len:] *= fade_out
+
+        # Final Audio Formatting
+        # Normalize to 16-bit integer range for WAV format, leave a little headroom (0.95) to prevent clipping
+        max_signal = np.max(np.abs(audio_resampled))
+
+        if max_signal > 0:
+            audio_resampled = audio_resampled / max_signal
+
+        audio_int16 = (audio_resampled * 32767 * 0.95).astype(np.int16)
+
+        # Setup file names and paths
+        audio_path = f"{movie_path}_audio.wav"
+        movie_with_audio = f"{movie_path}_sound.mp4"
+
+        # Write to file
+        try:
+            write_wav(audio_path, target_rate, audio_int16)
+            print("Audio generation complete.")
+        except Exception as e:
+            print(f"\nAn error occurred during audio generation: {e}")
+            print("Skipping audio merging.")
+            return # Exit if audio failed
+
+        # --- Merge Video and Audio ---
+        if STATUS_MESSAGES:
+            print(f"Merging video and audio...")
+        try:
+            # Setup video clip and audio clip
+            video_clip = VideoFileClip(movie_path_name)
+            audio_clip = AudioFileClip(audio_path)
+
+            # Set the audio of the video clip, with durations equal
+            final_clip = video_clip.with_audio(audio_clip.with_duration(video_clip.duration))
+
+            # Write the final file
+            final_clip.write_videofile(
+                movie_with_audio,
+                fps=frames_per_second,
+                codec="libx264",
+                audio_codec="aac",  # Common audio codec for mp4
+                logger='bar'        # Show a progress bar
+            )
+
+            final_clip.close()
+            video_clip.close()
+            audio_clip.close()
+
+            # Clean up temporary files
+            os.remove(audio_path)
+            os.remove(movie_path_name)
+
+        except Exception as e:
+             print(f"\nAn error occurred during merging: {e}")
+             print("Please check your 'moviepy' and 'ffmpeg' installation.")
+             print(f"Your silent video is at: {movie_path_name}")
+             print(f"Your audio file is at: {audio_path}")
+
+    # Use f-strings for final messages
+    total_time = time.time() - start_time
+    print(
+        f"\nSaved {n_frames} frames to {movie_file_path} in {dhms_time(total_time)}.")
+    print(f"Movie saved to {movie_with_audio if FREQ_SOUND else movie_path_name}")
+    sys.exit(0)
 
 # --- Doctest and Main Execution Guard ---
 if __name__ == "__main__":
