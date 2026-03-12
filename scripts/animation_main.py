@@ -5,8 +5,8 @@ of the black holes and their gravitational waves. At each state, the black holes
 moved to their respective positions and the render is saved as a .png file.
 """
 
-# --- ADJUSTABLE PARAMETERS FOR VISUALIZATION ---
-# Feel free to modify to change the appearance of the movie/rendering process!
+# --- DEFAULT PARAMETERS FOR VISUALIZATION ---
+# Defaults for the appearance of the movie/rendering process
 
 USE_SYS_ARGS = True # Change to turn on/off default parameters. Leave on if you want to input your own data.
 STATUS_MESSAGES = True # Change to turn on/off status reports during rendering
@@ -58,57 +58,37 @@ def swsh_summation_angles(
     mode_data: NDArray[np.complex128],
     ell_min: int,
     ell_max: int,
-    status_messages=True
+    status_messages=True,
 ) -> NDArray[np.complex128]:
     """
-    Sum all the strain modes after factoring in the
-    corresponding spin-weighted spherical harmonic
-    for the specified angles in the mesh. Stored as an array corresponding to [angle, time] indices.
+    Optimized SWSH summation using a single BLAS-backed matrix multiplication.
 
-    This version is optimized to avoid creating the large intermediate
-    (n_modes, n_pts, n_times) array by looping over the modes
-    and summing the contributions directly.
+    Computes the spin-weighted spherical harmonic matrix once and performs
+    a matrix multiply to combine it with `mode_data`:
 
-    :param colat: Colatitude angle for the SWSH factor.
-    :param azi: Azimuthal angles for the SWSH factor.
-    :param mode_data: Numpy array containing strain data for all the modes, shape (n_modes, n_times).
-    :param ell_min: Minimum l mode to use in SWSH
-    :param ell_max: Maximum l mode to use in SWSH
-    :return: A complex valued numpy array of the superimposed wave, shape (n_azi_pts, n_times).
+        result = swsh_arr.T @ mode_data
+
+    This replaces the previous Python loop over modes with a single
+    high-performance BLAS call.
     """
+    if status_messages:
+        print("Computing quaternionic coordinates and Wigner SWSH matrix...")
 
     quat_arr = quaternionic.array.from_spherical_coordinates(colat, azi)
     winger = spherical.Wigner(ell_max, ell_min)
-    # Create an swsh array shaped like (n_modes, n_quaternions)
     swsh_arr = winger.sYlm(S_MODE, quat_arr).T
 
-    # Get shapes of inputs
-    n_modes, n_times = mode_data.shape
-    n_pts = azi.shape[0]
+    # Sanity check shapes
+    if swsh_arr.shape[0] != mode_data.shape[0]:
+        raise ValueError(
+            "Mismatch in number of modes between computed SWSH array and provided mode_data."
+            f" swsh_arr.shape={swsh_arr.shape}, mode_data.shape={mode_data.shape}"
+        )
 
-    # Pre-allocate the *final* result array, which fits in memory
-    result = np.zeros((n_pts, n_times), dtype=np.complex128)
-
-    # Loop over the modes (the axis we are summing over) with a progress bar
-    for i in range(n_modes):
-        # Get the contribution for this single mode
-        # mode_data[i, :] has shape (n_times,)
-        # swsh_arr[i, :, np.newaxis] has shape (n_pts, 1)
-        # Their product broadcasts to (n_pts, n_times)
-        contribution = swsh_arr[i, :, np.newaxis] * mode_data[i, :]
-
-        # Add this mode's contribution to the total sum
-        result += contribution
-
-        # Update status
-        if status_messages:
-            # Calculate progress based on the outer loop index 'azi_idx'
-            progress = (i + 1) / (n_modes) * 100
-            # Use f-string formatting
-            print(f"\rProgress: {progress:.1f}% completed", end="", flush=True)
+    result = swsh_arr.T @ mode_data
 
     if status_messages:
-        print() # Print newline after status messages
+        print("SWSH summation complete.")
 
     return result
 
@@ -382,42 +362,56 @@ def compute_strain_to_mesh(
     n_azi_pts = strain_azi.shape[0]
     n_times = len(equal_times)
 
-    # Estimate chunk size based on available memory (heuristic)
-    chunk_size = min(int(psutil.virtual_memory().available / 70000000), n_azi_pts)
-    if chunk_size == 0:
-        raise RuntimeError("Not enough memory to begin mesh calculations. Reopen your terminal and try again.")
+    memory_budget = min(0.05 * psutil.virtual_memory().available, 512_000_000)
+
+    # Calculate bytes per element: n_times * 4 bytes
+    bytes_per_slice = n_times * 4
+
+    # Calculate max chunk sizes.
+    chunk_azi = max(1, int(np.sqrt(memory_budget / bytes_per_slice)))
+    chunk_rad = max(1, int(np.sqrt(memory_budget / bytes_per_slice)))
 
     if status_messages:
-         print(f"Using chunk size: {chunk_size} for azimuth interpolation.")
+         print(f"Memory budget: {memory_budget / 1_000_000:.2f} MB")
+         print(f"Using chunk size: azi={chunk_azi}, rad={chunk_rad} for interpolation.")
 
     strain_to_mesh = np.memmap(mmap_filename, dtype=np.float32, mode='w+', shape=(n_rad_pts, n_azi_pts, n_times))
 
-    for start_idx in range(0, n_azi_pts, chunk_size):
-        end_idx = min(start_idx + chunk_size, n_azi_pts)
+    if status_messages:
+        n_points = n_azi_pts * n_rad_pts
+        point = 0
 
-        # Interpolate each azimuth in the current chunk
-        for azi_idx in range(start_idx, end_idx):
-            # Use np.interp for each radial profile corresponding to this azimuth
-            # The values to interpolate *from* are strain_azi[azi_idx, :] at times time_array
-            # The points to interpolate *to* are the times given by lerp_times[:, time_idx] for each time_idx
-            # Result shape for one azi_idx should be (n_rad_pts, n_times)
-            for rad_idx in range(n_rad_pts):
-                strain_to_mesh[rad_idx, azi_idx, :] = np.interp(
-                    lerp_times[rad_idx, :], # Time coordinates to interpolate to
-                    time_array, # Original time coordinates (shape n_original_times)
-                    # Original strain values (shape n_original_times) scaled with symlog (if enabled) and dropoff factors
-                    dropoff_2D_flat[rad_idx] * (np.sign(strain_azi[azi_idx, :]) * np.log1p(np.abs(strain_azi[azi_idx, :])) if use_symlog else strain_azi[azi_idx, :])
-                )
+    for azi_start in range(0, n_azi_pts, chunk_azi):
+        azi_end = min(azi_start + chunk_azi, n_azi_pts)
 
-            # Update status
-            if status_messages:
-                # Calculate progress based on the outer loop index 'azi_idx'
-                progress = (azi_idx + 1) / (n_azi_pts) * 100
-                # Use f-string formatting
-                print(f"\rProgress: {progress:.1f}% completed", end="", flush=True)
+        # apply symlog locally to chunk
+        strain_azi_chunk = strain_azi[azi_start:azi_end, :]
+        if use_symlog:
+            strain_azi_chunk = np.sign(strain_azi_chunk) * np.log1p(np.abs(strain_azi_chunk))
 
-    # Flush mmap to disk
-    strain_to_mesh.flush()
+        for r_start in range(0, n_rad_pts, chunk_rad):
+            r_end = min(r_start + chunk_rad, n_rad_pts)
+
+            chunk_buffer = np.zeros((r_end - r_start, azi_end - azi_start, n_times), dtype=np.float32)
+
+            for i, r_idx in enumerate(range(r_start, r_end)):
+                for j, azi_idx in enumerate(range(azi_start, azi_end)):
+                    chunk_buffer[i, j, :] = np.interp(
+                        lerp_times[r_idx, :],
+                        time_array,
+                        strain_azi_chunk[j, :]
+                    ) * dropoff_2D_flat[r_idx]
+
+                    # Update status
+                    if status_messages:
+                        point += 1
+                        progress = point / n_points * 100
+                        print(f"\rProgress: {progress:.1f}% completed", end="", flush=True)
+
+            strain_to_mesh[r_start:r_end, azi_start:azi_end, :] = chunk_buffer
+
+        # Flush mmap to disk
+        strain_to_mesh.flush()
 
     # Create a new line after status messages complete
     if status_messages:
@@ -681,142 +675,111 @@ def plot_initial_mesh(engine: Engine, data_file_path: str, bh_scaling_factor: fl
 
     return source, surface
 
-def main() -> None:
-    """
-    Execute the main workflow of the gravitational wave animation script.
+def create_sound_file(
+    strain_to_mesh: Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]],
+    valid_indices: NDArray[int],
+    frames_per_second: int,
+    movie_path_name: str,
+    target_rate=48000,
+) -> None:
+    # Calculate sample rate with inverse of timestep
+    n_valid = len(valid_indices)
+    movie_length = n_valid / frames_per_second
+    dt = 1 / frames_per_second
 
-    Reads strain data, calculates and factors in spin-weighted spherical harmonics,
-    linearly interpolates the strain to fit mesh points, and creates .tvtk mesh
-    files for each time state. The meshes represent the full superimposed waveform at the polar angle pi/2
-    (the plane of the binary black hole merger). At each state, moves the black holes
-    to their respective positions and saves the mesh as a .png file. Finally,
-    compiles the PNG frames into an MP4 movie.
-    """
+    # Normalize Strain Data (Safety check) - Remove DC offset and normalize to avoid numerical issues during Hilbert
+    sound_strain = strain_to_mesh[0, 0, :][valid_indices]
+    sound_strain = sound_strain - np.mean(sound_strain)
 
-    # Convert psi4 data to strain using imported script
-    # This should ideally be called explicitly if needed, or integrated better.
-    # For now, assuming psi4strain.psi4_ffi_to_strain handles it or data is pre-converted.
-    # psi4_to_strain.main() # Example: If psi4_to_strain module existed
+    # Normalize strain data
+    if np.max(np.abs(sound_strain)) > 0:
+        sound_strain = sound_strain / np.max(np.abs(sound_strain))
 
-    # Check initial parameters
-    time0 = time.time() # Get the initial simulation time
-    global BH_DIR, MOVIE_DIR, EXT_RAD # Allow modification of globals based on args
-    bh1_rel_mass: float = 1.0 # Default mass
-    bh2_rel_mass: float = 1.24 # Default mass ratio for GW150914
-    use_symlog: bool = False # Default scale
+    # We pad with a reflection of the data to maintain continuity.
+    # 10% padding on each side is usually sufficient.
+    pad_length = int(n_valid * 0.1)
+    sound_strain_padded = np.pad(sound_strain, (pad_length, pad_length), mode='reflect')
+    pad_movie_length = 1.2 * movie_length
 
-    if USE_SYS_ARGS:
-        argc = len(sys.argv)
-        if argc not in (2, 3):
-            # Use raise RuntimeError for error exit
-            raise RuntimeError(
-                f"Usage: python3 {sys.argv[0]} <path_to_data_folder> [use_symlog: True/False]\n\n"
-                f"Example: python {sys.argv[0]} ../data/GW150914_data/r100 true\n\n"
-                "Arguments:\n"
-                "\t<path_to_data_folder>: Path to the directory containing merger data and converted strain.\n"
-                "\t                       Use LIST for a list of available data directories.\n"
-                "\t[use_symlog]: Optional. Use symmetric log scale for strain (True/False, default: False)."
-            ) # Use f-string for cleaner formatting
-        else:
-            # Change directories and extraction radius based on inputs
-            simulation_name = sys.argv[1]
-            bh_dir = os.path.join("../data", simulation_name)
+    # Extract Instantaneous Properties using the Hilbert Transform
+    # Separate envelope and phase can be extracted from analytic signal
+    analytic_signal = hilbert(sound_strain_padded)
 
-            # Set psi4_output_dir relative to bh_dir
-            psi4_output_dir = os.path.join(bh_dir, "strain")
-            movie_dir = os.path.join(bh_dir, "movies")  # Optimized path construction
+    # Extract Amplitude Envelope
+    amplitude_envelope = np.abs(analytic_signal)
 
-            # Handle optional symlog argument
-            if argc == 3:
-                symlog_arg = sys.argv[2].lower()
-                if symlog_arg == 'true':
-                    use_symlog = True
-                elif symlog_arg == 'false':
-                    use_symlog = False
-                else:
-                    raise ValueError("Argument 'use_symlog' must be 'true' or 'false'.")
+    # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
+    instantaneous_phase = np.unwrap(np.angle(analytic_signal))
 
-    else: # Use default parameters defined at the top
-        bh_dir = BH_DIR
-        movie_dir = MOVIE_DIR
-        psi4_output_dir = os.path.join(bh_dir, "converted_strain")
-        # Default mass ratio for GW150914 already set
-        # Default use_symlog is False
+    # Derivative of phase is angular frequency, divide by 2 * pi
+    # to get angular frequency in cycles per sample (time_idx)
+    instantaneous_freq = np.gradient(instantaneous_phase) * frames_per_second / (2 * np.pi)
 
-    # --- Ensure directories exist ---
+    # Scale freq based on the valid region
+    valid_freqs = instantaneous_freq[pad_length:-pad_length]
+    freq_scaling = 8000 / np.max(valid_freqs) # Scales up to 8000 Hz, a relatively high note
 
-    # List of available directories
-    data_path = "../data"
-    available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
+    # Ensure only frequencies for saved frames are considered
+    audio_freq = instantaneous_freq * freq_scaling
 
-    # Generate a string to list all available directories in the data path
-    dir_str = f"Available directories in {data_path}:\n\n"
-    for name in available_dirs:
-        dir_str += name + "\n"
+    # Clamp negative frequencies (can happen due to noise/numerical artifacts)
+    audio_freq = np.maximum(audio_freq, 0)
 
-    # Handle the case where the user has asked for the directory list
-    if simulation_name == "LIST":
-        print(f"\n{dir_str}")
-        sys.exit(0)
-    # Handle the case where the user entered an invalid simulation name. Also gives the directory list
-    elif simulation_name not in available_dirs:
-        raise FileNotFoundError(f"Data directory not found: {bh_dir}\n\n{dir_str}")
+    # Calculate target samples including the padding
+    num_audio_samples_padded = int(pad_movie_length * target_rate)
 
-    # --- Movie File Path Handling ---
-    bh_file_name = "puncture_posns_vels_regridxyzU.txt" # Name for the black hole position file
-    bh_file_path = os.path.join(bh_dir, "puncture", bh_file_name) # Black hole position file path
-    # Puncture file MUST EXIST for code to run
-    if not os.path.isfile(bh_file_path):
-         raise FileNotFoundError(f"Black hole position file not found: {bh_file_path}")
+    # Resample to fit the required audio bitrate & movie length
+    audio_freq_upsampled = resample(audio_freq, num_audio_samples_padded)
+    amplitude_upsampled = resample(amplitude_envelope, num_audio_samples_padded)
 
-    bh_scaling_factor = 2.0 # Visual scaling of black holes
+    # Synthesize the Sound Wave
+    # Must integrate frequency to get the new phase, Phase_new = Cumulative Sum of (Frequency * Time_Step * 2pi)
+    dt_audio = 1 / target_rate
+    new_phase = np.cumsum(audio_freq_upsampled * dt_audio * 2.0 * np.pi)
 
-    # A while loop to figure out where to save the simulation
-    movie_number = 1 # Movies are saved as real_movie1, real_movie2, etc
-    while True:
-        movie_dir_name = f"real_movie{movie_number}"
-        movie_file_path = os.path.join(movie_dir, movie_dir_name)
+    # Generate the new audio signal: Amplitude * sin(Phase), and slice only for valid indices
+    raw_audio_padded = amplitude_upsampled * np.sin(new_phase)
 
-        if os.path.exists(movie_file_path):
-            # Ask the user for permission to override existing file with same name
-            response = input(f"{movie_file_path} already exists. Would you like to overwrite it? Y/N: ")
-            if response.lower() != 'y':
-                movie_number += 1
-                continue # Continue if no clear permission was given
+    # We need to map the original pad_length (in input samples) to output samples
+    pad_length_audio = int(1 / 12 * num_audio_samples_padded)
 
-            # User confirmed overwrite
-            if STATUS_MESSAGES:
-                print(f"Overwriting existing files in {movie_file_path}...")
-            try:
-                # Clear existing files if user confirms overwrite
-                for file in os.listdir(movie_file_path):
-                    try:
-                        os.remove(os.path.join(movie_file_path, file))
-                    except OSError as e:
-                        print(f"Warning: Could not remove file {file}: {e}")
-                break # Exit loop after clearing or attempting to clear
-            except FileNotFoundError:
-                # The directory might have been deleted between check and listdir
-                print(f"Warning: Directory {movie_file_path} disappeared.")
-                # Allow code to continue, creating the movie file path from scratch this time
-            except Exception as e:
-                raise RuntimeError(f"Error clearing directory {movie_file_path}: {e}")
+    # Slice the center, removing the edge artifacts
+    audio_resampled = raw_audio_padded[pad_length_audio : -pad_length_audio]
 
-        # If no directory of the same name is present, create one (and parent movie_dir if needed)
-        try:
-            os.makedirs(movie_file_path, mode=0o755, exist_ok=True)
-            print(f"Output will be saved in: {movie_file_path}")
-            break # Exit loop after successful creation or confirmation
-        except OSError as e:
-            raise RuntimeError(f"Could not create output directory {movie_file_path}: {e}")
+    # Even with padding, a hard start/stop can cause a "click".
+    # Apply a 50ms fade in/out.
+    fade_len = int(0.05 * target_rate) # 50ms
+    if len(audio_resampled) > 2 * fade_len:
+        fade_in = np.linspace(0, 1, fade_len)
+        fade_out = np.linspace(1, 0, fade_len)
+        audio_resampled[:fade_len] *= fade_in
+        audio_resampled[-fade_len:] *= fade_out
 
-    movie_path = os.path.join(movie_file_path, movie_dir_name) # Full path + name of the movie
-    movie_path_name = movie_path + ".mp4"
+    # Final Audio Formatting
+    # Normalize to 16-bit integer range for WAV format, leave a little headroom (0.95) to prevent clipping
+    max_signal = np.max(np.abs(audio_resampled))
 
-    # --- Extraction Radius Calculations ---
-    bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
-    psi4_dir = os.path.join(bh_dir, "psi4")
-    strain_dir = os.path.join(bh_dir, "strain")
+    if max_signal > 0:
+        audio_resampled = audio_resampled / max_signal
+
+    audio_int16 = (audio_resampled * 32767 * 0.95).astype(np.int16)
+
+    # Setup file names and paths
+    audio_path = f"{movie_path_name[:-4]}_audio.wav"
+    movie_with_audio = f"{movie_path_name[:-4]}_sound.mp4"
+
+    # Write to file
+    try:
+        write_wav(audio_path, target_rate, audio_int16)
+        print("Audio generation complete.")
+    except Exception as e:
+        print(f"\nAn error occurred during audio generation: {e}")
+        print("Skipping audio merging.")
+        return # Exit if audio failed
+
+    return audio_path, movie_with_audio
+
+def extract_extrad_and_modes(psi4_dir: str, strain_dir: str, user_ext_rad: float = None) -> Tuple[np.float64, int, int, bool, str]:
     psi4_exists = os.path.isdir(psi4_dir)
     strain_exists = os.path.isdir(strain_dir)
 
@@ -830,51 +793,59 @@ def main() -> None:
         psi4_files += [f for f in psi4_file_list if os.path.isfile(os.path.join(psi4_dir, f))] # List only files
     if not (strain_exists or psi4_exists):
         # Throw an error if no data is provided
-        raise FileNotFoundError(f"No psi4 or strain data found in the directory {bh_dir}")
+        raise FileNotFoundError(f"No psi4 or strain data found in the directories")
 
     bh_files = strain_files + psi4_files # Concatenate psi4 and strain files into general files
+
     extraction_radii = np.empty(0)
     for b in bh_files:
         # Attempt to convert the part of the file name that is supposed to be the extraction radius into a float
         try:
-            radius_extraction = float(b[-10:-4])
+            r_val = float(b[-10:-4])
         except (ValueError, IndexError):
             try:
-                radius_extraction = float(b[-7:-4]) # Handle the case where it might be infinity
+                r_val = float(b[-7:-4]) # Handle the case where it might be infinity
             except (ValueError, IndexError):
                 continue
+        extraction_radii = np.unique(np.append(extraction_radii, r_val))
 
-        extraction_radii = np.unique(np.append(extraction_radii, radius_extraction)) # Save the extraction radius if unique
+    if user_ext_rad is not None:
+        radius_extraction = user_ext_rad
+        if radius_extraction not in extraction_radii:
+            # Format the string of available radii
+            radii_string = ""
+            for r in extraction_radii:
+                radii_string += str(r) + ", "
 
-    size = len(extraction_radii)
-    if size == 1:
-        radius_extraction = extraction_radii[0] # If only one extraction radius is found, use that one
-    elif size == 0:
-        # If no extraction radii are found, the files are probably incorrectly named
-        raise RuntimeError("No extraction radii found. Ensure files are formatted as such: {filename}_l#-r{####.# or inf}")
-    elif size > 1:
-        # Handle the case where multiple extraction radii are found
-        print("Warning: Multiple extraction radii found in the directory.")
-        while True:
-            response = input("Please enter the extraction radius you would like to use: ")
-            try:
-                # Attempt to parse user input into extraction radius float
-                radius_extraction = float(response)
-                # Print availabe extraction radii if user inputs one that is unavailable
-                if radius_extraction == float('inf'):
-                    break
-                elif radius_extraction not in extraction_radii:
-                    print("Available extraction radii:")
-                    for r in extraction_radii:
-                        print(r)
-                else:
-                    break # End the loop if a valid extraction radius has been entered
-            except ValueError:
-                print("Please enter 'inf' or a float from 0.0 to 9999.0.") # Handle the case where something else was entered
+            raise FileNotFoundError(f"Extraction radius doesn't exist. Available radii: {radii_string[:-2]}")
+    else:
+        size = len(extraction_radii)
+        if size == 1:
+            radius_extraction = extraction_radii[0] # If only one extraction radius is found, use that one
+        elif size == 0:
+            # If no extraction radii are found, the files are probably incorrectly named
+            raise RuntimeError("No extraction radii found. Ensure files are formatted as such: {filename}_l#-r{####.# or inf}")
+        elif size > 1:
+            # Handle the case where multiple extraction radii are found
+            print("Warning: Multiple extraction radii found in the directory.")
+            while True:
+                response = input("Please enter the extraction radius you would like to use: ")
+                try:
+                    # Attempt to parse user input into extraction radius float
+                    radius_extraction = float(response)
+                    # Print availabe extraction radii if user inputs one that is unavailable
+                    if radius_extraction == float('inf'):
+                        break
+                    elif radius_extraction not in extraction_radii:
+                        print("Available extraction radii:")
+                        for r in extraction_radii:
+                            print(r)
+                    else:
+                        break # End the loop if a valid extraction radius has been entered
+                except ValueError:
+                    print("Please enter 'inf' or a float from 0.0 to 9999.0.") # Handle the case where something else was entered
 
     ext_rad = radius_extraction
-
-    ext_rad_num = ext_rad if ext_rad != float('inf') else 0 # A number to use to manipulate data, based on extraction radius
 
     if STATUS_MESSAGES:
         print(f"Using extraction radius {ext_rad if ext_rad >= 0 else radius_extraction} for {'strain' if strain_exists else 'psi_4'} data")
@@ -884,6 +855,7 @@ def main() -> None:
     for file in strain_files:
         if str(radius_extraction) in file:
             r_ext_in_strain = True # If the extraction radius is in strain file name, set to true. Else, default to psi4
+
 
     # --- Minimum and Maximum Ell Mode Calculations ---
     ells = np.empty(0)
@@ -925,6 +897,213 @@ def main() -> None:
     if STATUS_MESSAGES:
         print(f"Using minimum mode l={ell_min} and maximum mode l={ell_max} for {'strain' if strain_exists else 'psi_4'} data")
 
+    return ext_rad, ell_min, ell_max, r_ext_in_strain, str_ext_rad
+
+def create_movie_directory(movie_dir: str) -> Tuple[str, str]:
+    # A while loop to figure out where to save the simulation
+    movie_number = 1 # Movies are saved as real_movie1, real_movie2, etc
+    while True:
+        movie_dir_name = f"real_movie{movie_number}"
+        movie_file_path = os.path.join(movie_dir, movie_dir_name)
+
+        if os.path.exists(movie_file_path):
+            # Ask the user for permission to override existing file with same name
+            response = input(f"{movie_file_path} already exists. Would you like to overwrite it? Y/N: ")
+            if response.lower() != 'y':
+                movie_number += 1
+                continue # Continue if no clear permission was given
+
+            # User confirmed overwrite
+            if STATUS_MESSAGES:
+                print(f"Overwriting existing files in {movie_file_path}...")
+            try:
+                # Clear existing files if user confirms overwrite
+                for file in os.listdir(movie_file_path):
+                    try:
+                        os.remove(os.path.join(movie_file_path, file))
+                    except OSError as e:
+                        print(f"Warning: Could not remove file {file}: {e}")
+                break # Exit loop after clearing or attempting to clear
+            except FileNotFoundError:
+                # The directory might have been deleted between check and listdir
+                print(f"Warning: Directory {movie_file_path} disappeared.")
+                # Allow code to continue, creating the movie file path from scratch this time
+            except Exception as e:
+                raise RuntimeError(f"Error clearing directory {movie_file_path}: {e}")
+
+        # If no directory of the same name is present, create one (and parent movie_dir if needed)
+        try:
+            os.makedirs(movie_file_path, mode=0o755, exist_ok=True)
+            print(f"Output will be saved in: {movie_file_path}")
+            break # Exit loop after successful creation or confirmation
+        except OSError as e:
+            raise RuntimeError(f"Could not create output directory {movie_file_path}: {e}")
+
+    # Full path + name of the movie + extension
+    movie_path_name = os.path.join(movie_file_path, movie_dir_name) + ".mp4"
+
+    return movie_file_path, movie_path_name
+
+def main() -> None:
+    """
+    Execute the main workflow of the gravitational wave animation script.
+
+    Reads strain data, calculates and factors in spin-weighted spherical harmonics,
+    linearly interpolates the strain to fit mesh points, and creates .tvtk mesh
+    files for each time state. The meshes represent the full superimposed waveform at the polar angle pi/2
+    (the plane of the binary black hole merger). At each state, moves the black holes
+    to their respective positions and saves the mesh as a .png file. Finally,
+    compiles the PNG frames into an MP4 movie.
+    """
+
+    # Convert psi4 data to strain using imported script
+    # This should ideally be called explicitly if needed, or integrated better.
+    # For now, assuming psi4strain.psi4_ffi_to_strain handles it or data is pre-converted.
+    # psi4_to_strain.main() # Example: If psi4_to_strain module existed
+
+    # Check initial parameters
+    time0 = time.time() # Get the initial simulation time
+    # Allow modification of global variables based on args
+    global BH_DIR, MOVIE_DIR, EXT_RAD, USE_SYS_ARGS, STATUS_MESSAGES, TRAJECTORY_LINES, PIP_VIEW, FREQ_SOUND, APPARENT_HORIZONS
+    bh1_rel_mass: float = 1.0 # Default mass
+    bh2_rel_mass: float = 1.24 # Default mass ratio for GW150914
+    use_symlog: bool = False # Default scale
+
+    import argparse
+
+    def str2bool(v):
+        if isinstance(v, bool):
+            return v
+        if v.lower() in ('yes', 'true', 't', 'y', '1'):
+            return True
+        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+            return False
+        else:
+            raise RuntimeError("Boolean value expected.")
+
+    usage_str = f"""Usage: python3 {os.path.basename(__file__)} <simulation_name> [options]\n\n
+Example: python3 {os.path.basename(__file__)} GW150914_data/r100 --use-symlog\n\n
+Arguments:
+\t<simulation_name> Simulation name with a directory in ../data containing merger data and converted strain.
+\t--list: Optional. List all available data directories.
+\t--use-symlog: Optional. Use symmetric log scale for strain.
+\t--r<value>: Optional. Extraction radius to use, e.g., --r100 or --rinf. Bypasses automatic detection.
+\t--use-default-args: Optional. Boolean. Use default settings instead of parsed arguments. Defaults to {not USE_SYS_ARGS}.
+\t--status-messages: Optional. Boolean. Toggle terminal progress readouts. Defaults to {STATUS_MESSAGES}.
+\t--trajectory-lines: Optional. Boolean. Toggle black hole trajectory tracking lines. Defaults to {TRAJECTORY_LINES}.
+\t--pip-view: Optional. Boolean. Toggle picture-in-picture view showing close-up of black holes. Defaults to {PIP_VIEW}.
+\t--freq-sound: Optional. Boolean. Toggle rendering of background audio based on strain frequency. Defaults to {FREQ_SOUND}.
+\t--apparent-horizons: Optional. Boolean. Toggle accurate horizon rendering (if data available). Defaults to {APPARENT_HORIZONS}."""
+
+    if "--list" in sys.argv:
+        data_path = "../data"
+        try:
+            available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
+        except FileNotFoundError:
+            available_dirs = []
+        dir_str = f"Available directories in {data_path}:\n\n"
+        for name in available_dirs:
+            dir_str += name + "\n"
+        print(f"\n{dir_str}")
+        sys.exit(0)
+
+    if len(sys.argv) == 2 and sys.argv[1] == "--help":
+        print(usage_str)
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(description="Animate gravitational wave strain.", add_help=False)
+    parser.add_argument("path_to_data_folder", nargs="?", default=BH_DIR, help="Path to the directory containing merger data.")
+    parser.add_argument("--use-symlog", action="store_true", help="Use symmetric log scale for strain.")
+    parser.add_argument("--use-default-args", type=str2bool, nargs='?', const=True, default=not USE_SYS_ARGS)
+    parser.add_argument("--status-messages", type=str2bool, nargs='?', const=True, default=STATUS_MESSAGES)
+    parser.add_argument("--trajectory-lines", type=str2bool, nargs='?', const=True, default=TRAJECTORY_LINES)
+    parser.add_argument("--pip-view", type=str2bool, nargs='?', const=True, default=PIP_VIEW)
+    parser.add_argument("--freq-sound", type=str2bool, nargs='?', const=True, default=FREQ_SOUND)
+    parser.add_argument("--apparent-horizons", type=str2bool, nargs='?', const=True, default=APPARENT_HORIZONS)
+
+    args, unknown = parser.parse_known_args()
+
+    # Re-assign global-like configurations locally
+    STATUS_MESSAGES = args.status_messages
+    TRAJECTORY_LINES = args.trajectory_lines
+    PIP_VIEW = args.pip_view
+    FREQ_SOUND = args.freq_sound
+    APPARENT_HORIZONS = args.apparent_horizons
+
+    if not args.use_default_args:
+        if len(sys.argv) == 1:
+            raise RuntimeError(usage_str)
+
+        # Change directories and extraction radius based on inputs
+        simulation_name = args.path_to_data_folder
+        bh_dir = os.path.join("../data", simulation_name)
+
+        # Set psi4_output_dir relative to bh_dir
+        psi4_output_dir = os.path.join(bh_dir, "strain")
+        movie_dir = os.path.join(bh_dir, "movies")  # Optimized path construction
+
+        # Handle optional symlog argument
+        use_symlog = args.use_symlog
+
+        user_ext_rad = None
+        invalid_unknowns = []
+        for unk in unknown:
+            if unk.startswith("--r"):
+                val_str = unk[3:]
+                if val_str == "inf":
+                    user_ext_rad = float("inf")
+                else:
+                    try:
+                        user_ext_rad = float(val_str)
+                    except ValueError:
+                        invalid_unknowns.append(unk)
+            else:
+                invalid_unknowns.append(unk)
+
+        if invalid_unknowns:
+            raise RuntimeError(usage_str)
+
+    else: # Use default parameters defined at the top
+        bh_dir = BH_DIR
+        movie_dir = MOVIE_DIR
+        psi4_output_dir = os.path.join(bh_dir, "converted_strain")
+        user_ext_rad = None
+        # Default mass ratio for GW150914 already set
+        # Default use_symlog is False
+
+    # --- Ensure directories exist ---
+
+    # List of available directories
+    data_path = "../data"
+    available_dirs = [name for name in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, name))]
+
+    # Generate a string to list all available directories in the data path
+    dir_str = f"Available directories in {data_path}:\n\n"
+    for name in available_dirs:
+        dir_str += name + "\n"
+
+    # Handle the case where the user entered an invalid simulation name. Also gives the directory list
+    if not os.path.exists(bh_dir):
+        raise FileNotFoundError(f"Data directory not found: {bh_dir}\n\n{dir_str}")
+
+    # --- Movie File Path Handling ---
+    bh_file_name = "puncture_posns_vels_regridxyzU.txt" # Name for the black hole position file
+    bh_file_path = os.path.join(bh_dir, "puncture", bh_file_name) # Black hole position file path
+    # Puncture file MUST EXIST for code to run
+    if not os.path.isfile(bh_file_path):
+         raise FileNotFoundError(f"Black hole position file not found: {bh_file_path}")
+
+    bh_scaling_factor = 2.0 # Visual scaling of black holes
+
+    movie_file_path, movie_path_name = create_movie_directory(movie_dir)
+    # --- Extraction Radius Calculations ---
+    bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
+    psi4_dir = os.path.join(bh_dir, "psi4")
+    strain_dir = os.path.join(bh_dir, "strain")
+
+    ext_rad, ell_min, ell_max, r_ext_in_strain, str_ext_rad = extract_extrad_and_modes(psi4_dir, strain_dir, user_ext_rad)
+    ext_rad_num = ext_rad if ext_rad != float('inf') else 0 # A number to use to manipulate data, based on extraction radius
+
     # --- Simulation & Visualization Parameters ---
     n_rad_pts = 450       # number of points along the radius
     n_azi_pts = 180       # number of points along the azimuth
@@ -952,14 +1131,13 @@ def main() -> None:
 
     # See if strain files exist, and if so, attempt to load them
     if r_ext_in_strain:
-        # One time iteration parameters
         time_array_set = False
-        mode_data_set = False
+        mode_data_list = []
 
         if STATUS_MESSAGES:
             print(f"Using existing strain data files in {strain_dir}")
 
-        # Iterate through each l mode and extract the appropriate strain data 
+        # Iterate through each l mode and extract the appropriate strain data
         files_processed = 0
         for l in range(ell_min, ell_max + 1):
 
@@ -968,45 +1146,35 @@ def main() -> None:
             file_path = os.path.join(psi4_output_dir, filename)
 
             # Determine expected number of columns based on l
-            # Time + each m from -l to l = 1 + (2l+1) = 2l+2 columns
-            # usecols goes up to max_col index, so max_col should be 2l+1
             max_col_idx = 2 * l + 1
-            cols_to_use = range(0, max_col_idx + 1) # Range includes 0, stops before max_col_idx + 1
+            cols_to_use = range(0, max_col_idx + 1)
 
             # Try to load the text files
             try:
-                # Load data, skipping header lines dynamically
-                # Header lines = 1 (time) + (number of modes = 2l+1)
-                num_skip_rows = 2*l + 2
+                num_skip_rows = 2 * l + 2
                 data_all = np.loadtxt(file_path, dtype=np.complex128, skiprows=num_skip_rows, usecols=cols_to_use)
                 files_processed += 1
             except FileNotFoundError:
                 print(f"Warning: File not found {file_path}, skipping l={l}.")
                 continue
-            except ValueError as e:
-                # Catch errors if columns don't exist or data is malformed
+            except (ValueError, IndexError) as e:
                 print(f"Warning: Error loading {file_path}: {e}. Skipping l={l}.")
                 continue
-            except IndexError:
-                # This might occur if usecols exceeds actual columns due to bad file or wrong max_col calculation
-                print(f"Warning: Index error loading columns from {file_path}. Skipping l={l}.")
-                continue
 
-            # For the first l mode, set the time array to the first column (the time column)
+            # For the first l mode, set the time array
             if not time_array_set:
                 time_array = data_all[:, 0].real
                 time_array_set = True
-            # For the first l mode, initialize the shape of the mode_data
-            if not mode_data_set:
-                mode_data = np.empty((0, len(time_array)))
-                mode_data_set = True
 
-            # Iteratively add to 2D mode_data array: shape (all l and m, n_times)
-            mode_data = np.vstack((mode_data, data_all[:, 1:].T))
+            # Append mode data to list for efficient stacking
+            mode_data_list.append(data_all[:, 1:].T)
 
-        # If all the files are skipped, end the program
+        # If no files were processed, end the program
         if files_processed == 0:
             raise FileNotFoundError(f"No valid strain files found in directory {psi4_output_dir} for l={ell_min} to {ell_max}.")
+
+        # Perform a single, efficient vstack after collecting all data
+        mode_data = np.vstack(mode_data_list)
 
     # If there is no strain, use psi4_FFI_to_strain to convert psi 4 into strain
     else:
@@ -1237,10 +1405,17 @@ def main() -> None:
     y_values = rv * np.sin(az)
 
     if STATUS_MESSAGES:
-         print("Calculating spin-weighted spherical harmonics...")
+         print("Calculating spin-weighted spherical harmonics (fast)...")
 
-    # Apply spin-weighted spherical harmonics, superimpose modes, and interpolate to mesh points
-    strain_azi = swsh_summation_angles(colat, azimuth_values, mode_data, ell_min, ell_max, STATUS_MESSAGES).real
+    # Apply spin-weighted spherical harmonics using the optimized BLAS-backed routine
+    strain_azi = swsh_summation_angles(
+        colat,
+        azimuth_values,
+        mode_data,
+        ell_min,
+        ell_max,
+        STATUS_MESSAGES,
+    ).real
 
     # Broadcasts equal_times and radius_values together to create a 2D array (n_radii, n_times) that shows the retarded
     # time at each radius, plus the extraction radius
@@ -1345,7 +1520,8 @@ def main() -> None:
     # Set XY coordinates (these don't change)
     np_points[:, 0] = x_flat
     np_points[:, 1] = y_flat
-    # Z coordinate will be updated in the loop
+    # Pre-fill the hole with NaNs so it is not rendered
+    np_points[~valid_mask, 2] = np.nan
 
     # Precompute camera parameters for each output frame
     time_indices = np.arange(n_times) # Indices 0 to n_frames-1
@@ -1501,8 +1677,9 @@ def main() -> None:
                     bh1_trajectory.mlab_source.reset(x=bh1_x[:time_idx], y=bh1_y[:time_idx], z=bh1_z[:time_idx])
                     bh2_trajectory.mlab_source.reset(x=bh2_x[:time_idx], y=bh2_y[:time_idx], z=bh2_z[:time_idx])
 
-                strain_slice = strain_to_mesh[..., time_idx].ravel() 
-                np_points[:, 2] = np.where(valid_mask, strain_slice, np.nan)
+                strain_slice = strain_to_mesh[..., time_idx].ravel()
+                # Update only the valid points (outside the hole)
+                np_points[valid_mask, 2] = strain_slice[valid_mask]
                 vtk_array.modified()
                 strain_array.from_array(strain_slice[valid_mask])
                 grid._set_points(points)
@@ -1540,101 +1717,7 @@ def main() -> None:
     # --- Generate audio file (if requested) ---
 
     if FREQ_SOUND:
-
-        # Calculate sample rate with inverse of timestep
-        movie_length = n_valid / frames_per_second
-        dt = 1 / frames_per_second
-        target_rate = 48000
-
-        # Normalize Strain Data (Safety check) - Remove DC offset and normalize to avoid numerical issues during Hilbert
-        sound_strain = strain_to_mesh[0, 0, :][valid_indices]
-        sound_strain = sound_strain - np.mean(sound_strain)
-
-        # Normalize strain data
-        if np.max(np.abs(sound_strain)) > 0:
-             sound_strain = sound_strain / np.max(np.abs(sound_strain))
-
-        # We pad with a reflection of the data to maintain continuity.
-        # 10% padding on each side is usually sufficient.
-        pad_length = int(n_valid * 0.1)
-        sound_strain_padded = np.pad(sound_strain, (pad_length, pad_length), mode='reflect')
-        pad_movie_length = 1.2 * movie_length
-
-        # Extract Instantaneous Properties using the Hilbert Transform
-        # Separate envelope and phase can be extracted from analytic signal
-        analytic_signal = hilbert(sound_strain_padded)
-
-        # Extract Amplitude Envelope
-        amplitude_envelope = np.abs(analytic_signal)
-
-        # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
-        instantaneous_phase = np.unwrap(np.angle(analytic_signal))
-
-        # Derivative of phase is angular frequency, divide by 2 * pi
-        # to get angular frequency in cycles per sample (time_idx)
-        instantaneous_freq = np.gradient(instantaneous_phase) * frames_per_second / (2 * np.pi)
-
-        # Scale freq based on the valid region
-        valid_freqs = instantaneous_freq[pad_length:-pad_length]
-        freq_scaling = 8000 / np.max(valid_freqs) # Scales up to 10000 Hz, a relatively high note
-
-        # Ensure only frequencies for saved frames are considered
-        audio_freq = instantaneous_freq * freq_scaling
-
-        # Clamp negative frequencies (can happen due to noise/numerical artifacts)
-        audio_freq = np.maximum(audio_freq, 0)
-
-        # Calculate target samples including the padding
-        num_audio_samples_padded = int(pad_movie_length * target_rate)
-
-        # Resample to fit the required audio bitrate & movie length
-        audio_freq_upsampled = resample(audio_freq, num_audio_samples_padded)
-        amplitude_upsampled = resample(amplitude_envelope, num_audio_samples_padded)
-
-        # Synthesize the Sound Wave
-        # Must integrate frequency to get the new phase, Phase_new = Cumulative Sum of (Frequency * Time_Step * 2pi)
-        dt_audio = 1 / target_rate
-        new_phase = np.cumsum(audio_freq_upsampled * dt_audio * 2.0 * np.pi)
-
-        # Generate the new audio signal: Amplitude * sin(Phase), and slice only for valid indices
-        raw_audio_padded = amplitude_upsampled * np.sin(new_phase)
-
-        # We need to map the original pad_length (in input samples) to output samples
-        pad_length_audio = int(1 / 12 * num_audio_samples_padded)
-
-        # Slice the center, removing the edge artifacts
-        audio_resampled = raw_audio_padded[pad_length_audio : -pad_length_audio]
-
-        # Even with padding, a hard start/stop can cause a "click".
-        # Apply a 50ms fade in/out.
-        fade_len = int(0.05 * target_rate) # 50ms
-        if len(audio_resampled) > 2 * fade_len:
-            fade_in = np.linspace(0, 1, fade_len)
-            fade_out = np.linspace(1, 0, fade_len)
-            audio_resampled[:fade_len] *= fade_in
-            audio_resampled[-fade_len:] *= fade_out
-
-        # Final Audio Formatting
-        # Normalize to 16-bit integer range for WAV format, leave a little headroom (0.95) to prevent clipping
-        max_signal = np.max(np.abs(audio_resampled))
-
-        if max_signal > 0:
-            audio_resampled = audio_resampled / max_signal
-
-        audio_int16 = (audio_resampled * 32767 * 0.95).astype(np.int16)
-
-        # Setup file names and paths
-        audio_path = f"{movie_path}_audio.wav"
-        movie_with_audio = f"{movie_path}_sound.mp4"
-
-        # Write to file
-        try:
-            write_wav(audio_path, target_rate, audio_int16)
-            print("Audio generation complete.")
-        except Exception as e:
-            print(f"\nAn error occurred during audio generation: {e}")
-            print("Skipping audio merging.")
-            return # Exit if audio failed
+        audio_path, movie_with_audio = create_sound_file(strain_to_mesh, valid_indices, frames_per_second, movie_path_name)
 
         # --- Merge Video and Audio ---
         if STATUS_MESSAGES:

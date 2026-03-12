@@ -16,6 +16,7 @@ import numpy as np
 import os
 import sys
 import sxs
+import argparse
 
 def convert_strain_to_ascii(strain: sxs.WaveformModes, output_dir: str) -> None:
     """
@@ -135,6 +136,13 @@ def _generate_sphere_coords(center, radius, N_theta=30, N_phi=60):
     :param N_theta: Resolution for theta (polar angle).
     :param N_phi: Resolution for phi (azimuthal angle).
     :return: A string formatted for gnuplot 'splot'.
+
+    DocTests:
+    >>> coords = _generate_sphere_coords((0, 0, 0), 1, N_theta=2, N_phi=2)
+    >>> type(coords) is str
+    True
+    >>> len(coords) > 0
+    True
     """
     theta_vals = np.linspace(0, np.pi, N_theta)
     phi_vals = np.linspace(0, 2 * np.pi, N_phi)
@@ -275,7 +283,7 @@ Generating apparent horizon .gp files..."""
 
     print(f"\nApparent horizon file generation complete. Saved {files_generated} files to {horizon_dir}")
 
-def extract_black_hole_positions(horizons, output_dir: str) -> None:
+def extract_black_hole_positions(horizons, output_dir: str, generate_horizons: bool) -> None:
     """
     Extract black hole horizon data and save it to a text file.
 
@@ -292,6 +300,7 @@ def extract_black_hole_positions(horizons, output_dir: str) -> None:
                      .coord_center_inertial, .dimensionful_inertial_spin,
                      .dimensionful_inertial_spin_mag, .chi_inertial, .chi_mag_inertial.
     :param output_dir: The directory where the output file will be saved.
+    :param generate_horizons: If True, generate .gp files for apparent horizons.
     :raises AttributeError: If the horizons object or its sub-objects are
                             missing required attributes.
     :raises FileNotFoundError: If the output directory does not exist or the
@@ -343,17 +352,18 @@ Extracting black hole horizon data..."""
     # All other arrays (amA, cmA, ..., ximA, amB, ..., ximB) should have compatible lengths
 
     # --- Generate apparent horizon .gp files ---
-    generate_apparent_horizons(
-        output_dir, time, merger_index,
-        xA, yA, zA, amA,  # BH1/C data
-        xB, yB, zB, amB   # BH2 data
-    )
+    if generate_horizons:
+        generate_apparent_horizons(
+            output_dir, time, merger_index,
+            xA, yA, zA, amA,  # BH1/C data
+            xB, yB, zB, amB   # BH2 data
+        )
     # --- End new call ---
 
     generate_bh_file(output_dir, time, amA, cmA, xA, yA, zA, disxA, disyA, diszA, dismA, xixA, xiyA, xizA, ximA,
                      amB, cmB, xB, yB, zB, disxB, disyB, diszB, dismB, xixB, xiyB, xizB, ximB)
 
-def generate_positions_from_metadata(time, metadata, output_dir: str) -> None:
+def generate_positions_from_metadata(time, metadata, output_dir: str, generate_horizons: bool) -> None:
     n_times = len(time)
 
     xA, yA = [], []
@@ -405,14 +415,15 @@ def generate_positions_from_metadata(time, metadata, output_dir: str) -> None:
     ximB = np.full(n_times, 0)
 
     # --- Generate apparent horizon .gp files ---
-    # For metadata-generated positions, there is no "merger".
-    # Set merger_index to n_times so it only generates ah1 and ah2 files.
-    merger_index = n_times
-    generate_apparent_horizons(
-        output_dir, time, merger_index,
-        np.array(xA), np.array(yA), zA, amA,  # BH1 data
-        np.array(xB), np.array(yB), zB, amB   # BH2 data
-    )
+    if generate_horizons:
+        # For metadata-generated positions, there is no "merger".
+        # Set merger_index to n_times so it only generates ah1 and ah2 files.
+        merger_index = n_times
+        generate_apparent_horizons(
+            output_dir, time, merger_index,
+            np.array(xA), np.array(yA), zA, amA,  # BH1 data
+            np.array(xB), np.array(yB), zB, amB   # BH2 data
+        )
     # --- End new call ---
 
     generate_bh_file(output_dir, time, amA, cmA, xA, yA, zA, disxA, disyA, diszA, dismA, xixA, xiyA, xizA, ximA,
@@ -450,60 +461,69 @@ def generate_bh_file(output_dir, time, amA, cmA, xA, yA, zA, disxA, disyA, diszA
     np.savetxt(output_file, data, header="\n".join(header), comments="", fmt="%.15e")
     print(f"Saved black hole positions to {output_file}")
 
-if __name__ == "__main__":
-    args = len(sys.argv)
-    if args not in range(2, 6): # Expects 1 to 4 arguments + script name
-        raise ValueError(f"""Usage: python3 {os.path.basename(__file__)}
-                             <simulation_name (e.g. SXS:BBH:3890)>
-                             [extrapolation (e.g. L1 for linear]>
-                             [version (e.g. 3.0)]
-                             [resolution (e.g. Lev3)]""")
+def main() -> None:
+    usage_str = f"""Usage: python3 {os.path.basename(__file__)} <simulation_name> [options]\n\n
+Example: python3 {os.path.basename(__file__)} SXS:BBH:3890 --generate_horizons --extrapolation N4 --version 3.0 --resolution Lev3\n\n
+Arguments:
+\t<simulation_name>: SXS simulation name (e.g. SXS:BBH:3890).
+\t--generate_horizons: Optional. Generate .gp files for apparent horizons (not real data).
+\t--extrapolation N#: Optional. Extrapolation order (e.g. N4).
+\t--version #.#: Optional. SXS catalog version (e.g. 3.0).
+\t--resolution Lev#: Optional. Simulation resolution (e.g. Lev3)."""
 
-    # Extract SXS simulation name and virtual extraction radius
-    simulation_name = sys.argv[1]
+    if len(sys.argv) == 2 and sys.argv[1] == "--help":
+        print(usage_str)
+        sys.exit(0)
+    elif len(sys.argv) == 1:
+        raise RuntimeError(usage_str)
 
-    # Extract version, resolution, and extrapolation, if included.
-    extrapolation = "N4"
-    version = None
-    resolution = None
+    parser = argparse.ArgumentParser(description="Process gravitational waveform data from SXS simulations.", add_help=False)
+    parser.add_argument("simulation_name", help="SXS simulation name (e.g. SXS:BBH:3890)")
+    parser.add_argument("--generate_horizons", action="store_true", help="Generate .gp files for apparent horizons.")
+    parser.add_argument("--extrapolation", default="N4", help="Extrapolation order (e.g. N4).")
+    parser.add_argument("--version", help="SXS catalog version (e.g. 3.0).")
+    parser.add_argument("--resolution", help="Simulation resolution (e.g. Lev3).")
 
-    if args >= 3:
-        extrapolation = sys.argv[2]
-        e = ValueError("Extrapolation must be in the format Nx, where x is a positive integer")
-        if not extrapolation[0] == "N": # Ensure extrapolation starts with "N"
-            raise e
+    args = parser.parse_args()
+
+    simulation_name = args.simulation_name
+    generate_horizons = args.generate_horizons
+    extrapolation = args.extrapolation
+    version = args.version
+    resolution = args.resolution
+    
+    e_extrap = ValueError("Extrapolation must be in the format Nx, where x is a positive integer")
+    if not extrapolation.startswith("N"):
+        raise e_extrap
+    try:
+        if int(extrapolation[1:]) <= 0:
+            raise e_extrap
+    except (ValueError, IndexError):
+        raise e_extrap
+
+    if version:
+        e_version = ValueError("Version must be a decimal number greater than 0")
         try:
-            if int(extrapolation[1:]) <= 0: # What follows must be a positive integer
-                raise e
+            if float(version) <= 0:
+                raise e_version
         except ValueError:
-            raise e
+            raise e_version
 
-        if args >= 4:
-            version = sys.argv[3]
-            e = ValueError("Version must be a decimal number greater than 0")
-            try:
-                if float(version) <= 0: # Version must be an decimal greater than zero
-                    raise e
-            except ValueError:
-                raise e
-
-            if args == 5:
-                resolution = sys.argv[4]
-                e = ValueError("Extrapolation must be in the format Levx, where x is a positive integer")
-
-                if not resolution[:3] == "Lev": # Ensure resolution starts with "Lev"
-                    raise e
-                try:
-                    if int(resolution[3:]) <= 0: # What follows must be a positive integer
-                        raise e
-                except ValueError:
-                    raise e
+    if resolution:
+        e_resolution = ValueError("Resolution must be in the format Levx, where x is a positive integer")
+        if not resolution.startswith("Lev"):
+            raise e_resolution
+        try:
+            if int(resolution[3:]) <= 0:
+                raise e_resolution
+        except (ValueError, IndexError):
+            raise e_resolution
+            
     try:
         # Path for simulation data, formatted to include version and resolution if provided. Otherwise, the database
         # will load the latest version and highest resolution.
         sim_path = simulation_name + f"{'' if version==None else 'v' + version}" + f"{'' if resolution==None else '/' + resolution}"
-        sim = sxs.load(sim_path, extrapolation="N4") # Loads strain data extrapolated to null infinity.
-                                                     # Extrapolated with quartics
+        sim = sxs.load(sim_path, extrapolation=extrapolation)
     except RuntimeError as e:
         raise RuntimeError(f"""An error ocurred during SXS data loading: {e}
                            SXS simulations are named in the format SXS:<BBH or BHNS or NSNS>:####""")
@@ -525,11 +545,32 @@ if __name__ == "__main__":
 
     if not horizons == None:
         # Extract black hole positions and save to ASCII
-        extract_black_hole_positions(sim.horizons, simulation_path)
+        extract_black_hole_positions(sim.horizons, simulation_path, generate_horizons)
     else:
         try:
-            generate_positions_from_metadata(sim.h.t, sim.metadata, simulation_path)
+            generate_positions_from_metadata(sim.h.t, sim.metadata, simulation_path, generate_horizons)
         except ValueError as e:
-            raise ValueError("No metadata found: {e}")
+            raise ValueError(f"No metadata found: {e}")
 
     print("\nConversion and extraction complete.")
+
+if __name__ == "__main__":
+    import doctest
+    results = doctest.testmod(verbose=False)
+    if results.failed > 0:
+        print(f"Doctest failed: {results.failed} of {results.attempted} test(s)")
+        sys.exit(1)
+
+    import traceback
+    try:
+        main()
+    except (RuntimeError, FileNotFoundError, ValueError, IndexError) as e:
+        # Catch expected errors from main() and print cleanly
+        print(f"\nExecution failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+         # Catch unexpected errors
+         print(f"\nAn unexpected error occurred during main execution: {e}", file=sys.stderr)
+         # Optionally print traceback for debugging unexpected errors
+         traceback.print_exc()
+         sys.exit(1)
