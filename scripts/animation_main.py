@@ -14,12 +14,13 @@ TRAJECTORY_LINES = False # Change to turn on/off lines tracking trajectories of 
 PIP_VIEW = False # Change to turn on/off picture in picture view at corner of movie showing close up of black holes
 FREQ_SOUND = True # Change to turn on/off background sound based on strain frequency
 APPARENT_HORIZONS = False # Change to turn on/off accurate horizon rendering. Use only if you have data.
+SPIN_VECTORS = False # Change to turn on/off spin vectors for black holes
 
 import os
 import sys
 import time
 import psutil
-from math import erf
+import math
 from typing import Tuple, Any
 import numpy as np
 from numpy.typing import NDArray
@@ -45,12 +46,25 @@ import psi4_FFI_to_strain as psi4strain
 import traceback
 from scipy.io.wavfile import write as write_wav
 from moviepy import VideoFileClip, AudioFileClip
+import matplotlib.pyplot as plt
 
 # Default parameters used when USE_SYS_ARGS is False
 BH_DIR = "../data/GW150914_data/r100" # changeable with sys arguments
 MOVIE_DIR = "../data/GW150914_data/movies" # changeable with sys arguments
 S_MODE = -2
+ALPHA = 0
+DELTA = 0
+PSI = 0
 EXT_RAD = 100 # changeable with sys arguments
+
+def compute_detector_strain(complex_strain: NDArray[np.complex128], alpha: float, delta: float, psi: float) -> NDArray[np.float64]:
+    # F_+ = 1/2 (1 + cos^2(delta)) cos(2 alpha) cos(2 psi) - cos(delta) sin(2 alpha) sin(2 psi)
+    f_plus = 0.5 * (1 + np.cos(delta)**2) * np.cos(2 * alpha) * np.cos(2 * psi) - np.cos(delta) * np.sin(2 * alpha) * np.sin(2 * psi)
+    # F_x = 1/2 (1 + cos^2(delta)) cos(2 alpha) sin(2 psi) + cos(delta) sin(2 alpha) cos(2 psi)
+    f_cross = 0.5 * (1 + np.cos(delta)**2) * np.cos(2 * alpha) * np.sin(2 * psi) + np.cos(delta) * np.sin(2 * alpha) * np.cos(2 * psi)
+
+    # Combined strain
+    return f_plus * np.real(complex_strain) + f_cross * np.imag(complex_strain)
 
 def swsh_summation_angles(
     colat: float,
@@ -91,41 +105,6 @@ def swsh_summation_angles(
         print("SWSH summation complete.")
 
     return result
-
-def interpolate_coords_by_time(
-    old_times: NDArray[np.float64],
-    e1: NDArray[np.float64],
-    e2: NDArray[np.float64],
-    e3: NDArray[np.float64],
-    new_times: NDArray[np.float64],
-) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """
-    Interpolate the 3D coordinates to the given time states.
-
-    :param old_times: 1D array of original time values.
-    :param e1: 1D array of the first coordinate values corresponding to old_times.
-    :param e2: 1D array of the second coordinate values corresponding to old_times.
-    :param e3: 1D array of the third coordinate values corresponding to old_times.
-    :param new_times: 1D array of new time values to interpolate to.
-    :return: A tuple of three 1D arrays representing the interpolated coordinates (e1, e2, e3) at new_times.
-
-    DocTests:
-    >>> old_times = np.array([0., 1., 2.])
-    >>> e1 = np.array([0., 1., 4.])
-    >>> e2 = np.array([0., 2., 5.])
-    >>> e3 = np.array([0., 3., 6.])
-    >>> new_times = np.array([0.5, 1.5])
-    >>> interpolate_coords_by_time(old_times, e1, e2, e3, new_times)
-    (array([0.5, 2.5]), array([1. , 3.5]), array([1.5, 4.5]))
-    """
-
-    # Create a single interpolator for all coordinates
-    interpolator = interp1d(old_times, np.vstack((e1, e2, e3)), fill_value="extrapolate")
-
-    # Interpolate all coordinates at once
-    new_e1, new_e2, new_e3 = interpolator(new_times)
-
-    return new_e1, new_e2, new_e3
 
 def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
     """
@@ -676,106 +655,99 @@ def plot_initial_mesh(engine: Engine, data_file_path: str, bh_scaling_factor: fl
     return source, surface
 
 def create_sound_file(
-    strain_to_mesh: Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]],
-    valid_indices: NDArray[int],
+    mode_data: np.ndarray,
+    time_array: np.ndarray,
+    ell_min: int,
+    ell_max: int,
+    valid_equal_times: np.ndarray,
     frames_per_second: int,
     movie_path_name: str,
     target_rate=48000,
-) -> None:
-    # Calculate sample rate with inverse of timestep
-    n_valid = len(valid_indices)
+) -> Tuple[str, str]:
+
+    n_valid = len(valid_equal_times)
     movie_length = n_valid / frames_per_second
-    dt = 1 / frames_per_second
 
-    # Normalize Strain Data (Safety check) - Remove DC offset and normalize to avoid numerical issues during Hilbert
-    sound_strain = strain_to_mesh[0, 0, :][valid_indices]
-    sound_strain = sound_strain - np.mean(sound_strain)
+    # Interpolate physical time linearly over the audio timeline
+    movie_frame_times = np.linspace(0, movie_length, n_valid)
+    num_audio_samples = int(movie_length * target_rate)
+    audio_movie_times = np.linspace(0, movie_length, num_audio_samples)
+    audio_physical_times = np.interp(audio_movie_times, movie_frame_times, valid_equal_times)
 
-    # Normalize strain data
-    if np.max(np.abs(sound_strain)) > 0:
-        sound_strain = sound_strain / np.max(np.abs(sound_strain))
+    # 1. Find the multiplier K based on the 2,2 mode (index 4)
+    mode_22 = mode_data[4]
+    # Mode data is already complex, no need for Hilbert!
+    phase_22 = np.unwrap(np.angle(mode_22))
+    freq_22 = np.gradient(phase_22, time_array)
 
-    # We pad with a reflection of the data to maintain continuity.
-    # 10% padding on each side is usually sufficient.
-    pad_length = int(n_valid * 0.1)
-    sound_strain_padded = np.pad(sound_strain, (pad_length, pad_length), mode='reflect')
-    pad_movie_length = 1.2 * movie_length
+    # Max frequency within the valid time window
+    valid_mask = (time_array >= valid_equal_times[0]) & (time_array <= valid_equal_times[-1])
+    max_freq_22 = np.max(freq_22[valid_mask])
 
-    # Extract Instantaneous Properties using the Hilbert Transform
-    # Separate envelope and phase can be extracted from analytic signal
-    analytic_signal = hilbert(sound_strain_padded)
+    # Target max frequency in angular frequency is 2 * pi * 1000
+    # The audio is played back over 'movie_length' seconds, but the phase is defined over 'valid_equal_times' (physical time).
+    # To hear exactly 100 Hz (user's value), we must account for the time-stretching factor between physical time and playback time.
+    dt_phys_per_sec = (valid_equal_times[-1] - valid_equal_times[0]) / movie_length
+    K = (2 * np.pi * 1000) / (max_freq_22 * dt_phys_per_sec)
 
-    # Extract Amplitude Envelope
-    amplitude_envelope = np.abs(analytic_signal)
+    shifted_mode_data = np.zeros((len(mode_data), len(audio_physical_times)), dtype=np.complex128)
 
-    # Instantaneous phase of signal, unwrapped to remove 2 * pi jumps
-    instantaneous_phase = np.unwrap(np.angle(analytic_signal))
+    for i, mode in enumerate(mode_data):
+        # Directly use complex properties
+        amp = np.abs(mode)
+        phase = np.unwrap(np.angle(mode))
 
-    # Derivative of phase is angular frequency, divide by 2 * pi
-    # to get angular frequency in cycles per sample (time_idx)
-    instantaneous_freq = np.gradient(instantaneous_phase) * frames_per_second / (2 * np.pi)
+        # Interpolate amp and phase to high-res audio times
+        amp_interp = np.interp(audio_physical_times, time_array, amp)
+        phase_interp = np.interp(audio_physical_times, time_array, phase)
 
-    # Scale freq based on the valid region
-    valid_freqs = instantaneous_freq[pad_length:-pad_length]
-    freq_scaling = 8000 / np.max(valid_freqs) # Scales up to 8000 Hz, a relatively high note
+        # Synthesize pitch-shifted mode
+        shifted_mode_data[i] = amp_interp * np.exp(1j * K * phase_interp)
 
-    # Ensure only frequencies for saved frames are considered
-    audio_freq = instantaneous_freq * freq_scaling
+    # Now evaluate SWSH at the single detector point for all modes, on the audio timeline
+    audio_colat = np.pi / 2 - DELTA
+    audio_azi = np.array([ALPHA]) # Single point
 
-    # Clamp negative frequencies (can happen due to noise/numerical artifacts)
-    audio_freq = np.maximum(audio_freq, 0)
+    print("Computing detector strain for audio...")
+    complex_strain_audio = swsh_summation_angles(
+        audio_colat,
+        audio_azi,
+        shifted_mode_data,
+        ell_min,
+        ell_max,
+        status_messages=False
+    )[0] # Extract the single azimuth row
 
-    # Calculate target samples including the padding
-    num_audio_samples_padded = int(pad_movie_length * target_rate)
+    # Apply antenna pattern logic
+    final_audio_strain = compute_detector_strain(complex_strain_audio, ALPHA, DELTA, PSI)
 
-    # Resample to fit the required audio bitrate & movie length
-    audio_freq_upsampled = resample(audio_freq, num_audio_samples_padded)
-    amplitude_upsampled = resample(amplitude_envelope, num_audio_samples_padded)
-
-    # Synthesize the Sound Wave
-    # Must integrate frequency to get the new phase, Phase_new = Cumulative Sum of (Frequency * Time_Step * 2pi)
-    dt_audio = 1 / target_rate
-    new_phase = np.cumsum(audio_freq_upsampled * dt_audio * 2.0 * np.pi)
-
-    # Generate the new audio signal: Amplitude * sin(Phase), and slice only for valid indices
-    raw_audio_padded = amplitude_upsampled * np.sin(new_phase)
-
-    # We need to map the original pad_length (in input samples) to output samples
-    pad_length_audio = int(1 / 12 * num_audio_samples_padded)
-
-    # Slice the center, removing the edge artifacts
-    audio_resampled = raw_audio_padded[pad_length_audio : -pad_length_audio]
-
-    # Even with padding, a hard start/stop can cause a "click".
-    # Apply a 50ms fade in/out.
-    fade_len = int(0.05 * target_rate) # 50ms
-    if len(audio_resampled) > 2 * fade_len:
+    # Fade in and out to prevent popping
+    fade_len = int(0.05 * target_rate) # 50ms fade
+    if len(final_audio_strain) > 2 * fade_len:
         fade_in = np.linspace(0, 1, fade_len)
         fade_out = np.linspace(1, 0, fade_len)
-        audio_resampled[:fade_len] *= fade_in
-        audio_resampled[-fade_len:] *= fade_out
+        final_audio_strain[:fade_len] *= fade_in
+        final_audio_strain[-fade_len:] *= fade_out
 
-    # Final Audio Formatting
-    # Normalize to 16-bit integer range for WAV format, leave a little headroom (0.95) to prevent clipping
-    max_signal = np.max(np.abs(audio_resampled))
-
+    # Global amplitude normalization
+    max_signal = np.max(np.abs(final_audio_strain))
     if max_signal > 0:
-        audio_resampled = audio_resampled / max_signal
+        final_audio_strain = final_audio_strain / max_signal
 
-    audio_int16 = (audio_resampled * 32767 * 0.95).astype(np.int16)
+    # Convert to int16
+    audio_int16 = (final_audio_strain * 32767 * 0.95).astype(np.int16)
 
-    # Setup file names and paths
+    # Setup file names
     audio_path = f"{movie_path_name[:-4]}_audio.wav"
     movie_with_audio = f"{movie_path_name[:-4]}_sound.mp4"
 
-    # Write to file
     try:
         write_wav(audio_path, target_rate, audio_int16)
         print("Audio generation complete.")
     except Exception as e:
         print(f"\nAn error occurred during audio generation: {e}")
         print("Skipping audio merging.")
-        return # Exit if audio failed
+        return "", ""
 
     return audio_path, movie_with_audio
 
@@ -899,11 +871,19 @@ def extract_extrad_and_modes(psi4_dir: str, strain_dir: str, user_ext_rad: float
 
     return ext_rad, ell_min, ell_max, r_ext_in_strain, str_ext_rad
 
-def create_movie_directory(movie_dir: str) -> Tuple[str, str]:
+def create_movie_directory(movie_dir: str, alpha: float, delta: float, psi: float) -> Tuple[str, str]:
+    # Determine prefix
+    if math.isclose(alpha, 0) and math.isclose(delta, 0) and math.isclose(psi, 0, abs_tol=1e-5):
+        prefix = "real"
+    elif math.isclose(alpha, 0) and math.isclose(delta, 0) and math.isclose(psi, np.pi/4, abs_tol=1e-5):
+        prefix = "imag"
+    else:
+        prefix = f"({alpha:.2f},{delta:.2f},{psi:.2f})"
+
     # A while loop to figure out where to save the simulation
-    movie_number = 1 # Movies are saved as real_movie1, real_movie2, etc
+    movie_number = 1
     while True:
-        movie_dir_name = f"real_movie{movie_number}"
+        movie_dir_name = f"{prefix}_movie{movie_number}"
         movie_file_path = os.path.join(movie_dir, movie_dir_name)
 
         if os.path.exists(movie_file_path):
@@ -944,6 +924,22 @@ def create_movie_directory(movie_dir: str) -> Tuple[str, str]:
 
     return movie_file_path, movie_path_name
 
+def compute_max_bh_separation(bh_azis: NDArray[np.float64], magnitudes: NDArray[np.float64]) -> float:
+    orbit_start = find_idx(np.array(bh_azis), bh_azis[0] + (np.pi / 2 if bh_azis[0] < bh_azis[1] else np.pi / -2))
+    # If the array is 0 size, or if it only contains edge cases, set equal to last azi
+    if orbit_start[0] == bh_azis.size - 1:
+        orbit_start_idx = len(bh_azis) - 2
+    else:
+        orbit_start_idx = orbit_start[0]
+
+    orbit_end = find_idx(np.array(bh_azis), bh_azis[0] + (5 * np.pi / 2 if bh_azis[0] < bh_azis[1] else 5 * np.pi / -2))
+    if orbit_end[0] == bh_azis.size - 1:
+        orbit_end_idx = len(bh_azis) - 1
+    else:
+        orbit_end_idx = orbit_end[0]
+
+    return np.max(magnitudes[orbit_start_idx:orbit_end_idx])
+
 def main() -> None:
     """
     Execute the main workflow of the gravitational wave animation script.
@@ -963,8 +959,23 @@ def main() -> None:
 
     # Check initial parameters
     time0 = time.time() # Get the initial simulation time
+
+    mlab.close(all=True) # Close any existing Mayavi figures/engines
+
     # Allow modification of global variables based on args
-    global BH_DIR, MOVIE_DIR, EXT_RAD, USE_SYS_ARGS, STATUS_MESSAGES, TRAJECTORY_LINES, PIP_VIEW, FREQ_SOUND, APPARENT_HORIZONS
+    global BH_DIR, \
+        MOVIE_DIR, \
+        EXT_RAD, \
+        USE_SYS_ARGS, \
+        STATUS_MESSAGES, \
+        TRAJECTORY_LINES, \
+        PIP_VIEW, \
+        FREQ_SOUND, \
+        APPARENT_HORIZONS, \
+        SPIN_VECTORS, \
+        ALPHA, \
+        DELTA, \
+        PSI
     bh1_rel_mass: float = 1.0 # Default mass
     bh2_rel_mass: float = 1.24 # Default mass ratio for GW150914
     use_symlog: bool = False # Default scale
@@ -993,7 +1004,9 @@ Arguments:
 \t--trajectory-lines: Optional. Boolean. Toggle black hole trajectory tracking lines. Defaults to {TRAJECTORY_LINES}.
 \t--pip-view: Optional. Boolean. Toggle picture-in-picture view showing close-up of black holes. Defaults to {PIP_VIEW}.
 \t--freq-sound: Optional. Boolean. Toggle rendering of background audio based on strain frequency. Defaults to {FREQ_SOUND}.
-\t--apparent-horizons: Optional. Boolean. Toggle accurate horizon rendering (if data available). Defaults to {APPARENT_HORIZONS}."""
+\t--apparent-horizons: Optional. Boolean. Toggle accurate horizon rendering (if data available). Defaults to {APPARENT_HORIZONS}.
+\t--spin-vectors: Optional. Boolean. Toggle display of vectors tracking dimensionful spin. Defaults to {SPIN_VECTORS}.
+\t--detector-angle ALPHA DELTA PSI: Optional. Specify the three detector angles alpha, delta, and psi. Defaults to {ALPHA}, {DELTA}, {PSI}."""
 
     if "--list" in sys.argv:
         data_path = "../data"
@@ -1020,6 +1033,8 @@ Arguments:
     parser.add_argument("--pip-view", type=str2bool, nargs='?', const=True, default=PIP_VIEW)
     parser.add_argument("--freq-sound", type=str2bool, nargs='?', const=True, default=FREQ_SOUND)
     parser.add_argument("--apparent-horizons", type=str2bool, nargs='?', const=True, default=APPARENT_HORIZONS)
+    parser.add_argument("--spin-vectors", type=str2bool, nargs='?', const=True, default=SPIN_VECTORS)
+    parser.add_argument("--detector-angle", type=str, nargs='+', help="Alpha, Delta, and Psi detector angles")
 
     args, unknown = parser.parse_known_args()
 
@@ -1029,6 +1044,17 @@ Arguments:
     PIP_VIEW = args.pip_view
     FREQ_SOUND = args.freq_sound
     APPARENT_HORIZONS = args.apparent_horizons
+    SPIN_VECTORS = args.spin_vectors
+    if args.detector_angle:
+        if len(args.detector_angle) not in [1, 3]:
+            raise RuntimeError("At least three angles must be input when using --detector-angle. For + polarization, use --detector +. For x polarization, use --detector x.")
+        elif len(args.detector_angle) == 1:
+            if args.detector_angle[0] == "+":
+                ALPHA, DELTA, PSI = (0, 0, 0)
+            elif args.detector_angle[0] == "x":
+                ALPHA, DELTA, PSI = (0, 0, np.pi / 4)
+        else:
+            ALPHA, DELTA, PSI = [float(x) for x in args.detector_angle[:3]]
 
     if not args.use_default_args:
         if len(sys.argv) == 1:
@@ -1095,7 +1121,8 @@ Arguments:
 
     bh_scaling_factor = 2.0 # Visual scaling of black holes
 
-    movie_file_path, movie_path_name = create_movie_directory(movie_dir)
+    movie_file_path, movie_path_name = create_movie_directory(movie_dir, ALPHA, DELTA, PSI)
+
     # --- Extraction Radius Calculations ---
     bh_file_list = os.listdir(bh_dir) # Extract the files in the black hole directory
     psi4_dir = os.path.join(bh_dir, "psi4")
@@ -1107,7 +1134,7 @@ Arguments:
     # --- Simulation & Visualization Parameters ---
     n_rad_pts = 450       # number of points along the radius
     n_azi_pts = 180       # number of points along the azimuth
-    colat = np.pi / 2     # colatitude angle (pi/2 for equatorial plane)
+    colat = np.pi / 2 - DELTA     # colatitude angle aligned with detector declination
 
     # Cosmetic & camera parameters
     wireframe = True
@@ -1117,7 +1144,7 @@ Arguments:
     gw_color = (0.28, 0.46, 1.0) # Blueish
     bh_color = (0.1, 0.1, 0.1)   # Dark grey/black
     zoomout_distance = 350 # Max camera distance after zoomout
-    initial_elevation_angle = 50 # Initial camera elevation 
+    initial_elevation_angle = 50 # Initial camera elevation
     final_elevation_angle = 34   # Final camera elevation
     azi_angle = 45 # Default pi/4 azimuth camera angle
     FOV_angle = 30 # Default field of view angle
@@ -1239,7 +1266,7 @@ Arguments:
 
     mass_ratio = bh1_rel_mass / bh2_rel_mass
 
-    # Extract BH coordinates (Check columns: 3=x, 4=y, assuming z=0 initially)
+    # Extract BH coordinates (Check columns: 3=x, 4=y, 5=z)
     bh1_x0, bh1_y0, bh1_z0 = bh_data[:, 3], bh_data[:, 4], bh_data[:, 5]  # Assume motion is in xy-plane
 
     # Interpolate BH positions to the *strain* time array (equal_times)
@@ -1248,9 +1275,8 @@ Arguments:
     merge_idx_equal = find_idx(equal_times, merge_time)[0] # Find merge index in the output time array
 
     # Maintain original interpolation call
-    bh1_x, bh1_y, bh1_z = interpolate_coords_by_time(
-        bh_time, bh1_x0, bh1_y0, bh1_z0, equal_times
-    )
+    bh_interpolator = interp1d(bh_time, np.vstack((bh1_x0, bh1_y0, bh1_z0)), fill_value="extrapolate")
+    bh1_x, bh1_y, bh1_z = bh_interpolator(equal_times)
 
     # Vectorized coordinate calculation using array stacking
     pre_slice = slice(None, merge_idx_equal)
@@ -1267,6 +1293,11 @@ Arguments:
 
     less_massive_x = bh1_x if bh1_rel_mass < bh2_rel_mass else bh2_x # Find x and y coordinates of less massive bh
     less_massive_y = bh1_y if bh1_rel_mass < bh2_rel_mass else bh2_y # These will be the most "sweeping"
+
+    # Compute the radius of each black hole to be used in the animation
+    bh1_scaled_radius = bh1_rel_mass * bh_scaling_factor
+    bh2_scaled_radius = bh2_rel_mass * bh_scaling_factor
+    bh_merged_radius = (bh1_scaled_radius + bh2_scaled_radius) / bh2_scaled_radius
 
     if STATUS_MESSAGES:
         disp_mass_ratio = mass_ratio if mass_ratio >= 1 else 1 / mass_ratio # First bh should always be >=1 in the ratio
@@ -1408,14 +1439,14 @@ Arguments:
          print("Calculating spin-weighted spherical harmonics (fast)...")
 
     # Apply spin-weighted spherical harmonics using the optimized BLAS-backed routine
-    strain_azi = swsh_summation_angles(
+    strain_azi = compute_detector_strain(swsh_summation_angles(
         colat,
         azimuth_values,
         mode_data,
         ell_min,
         ell_max,
         STATUS_MESSAGES,
-    ).real
+    ), ALPHA, DELTA, PSI)
 
     # Broadcasts equal_times and radius_values together to create a 2D array (n_radii, n_times) that shows the retarded
     # time at each radius, plus the extraction radius
@@ -1428,25 +1459,14 @@ Arguments:
             f"{'*' * 70}\nCalculating cosmetic data..."
         )
 
-    orbit_start = find_idx(np.array(bh_azis), bh_azis[0] + (np.pi / 2 if bh_azis[0] < bh_azis[1] else np.pi / -2))
-    # If the array is 0 size, or if it only contains edge cases, set equal to last azi
-    if orbit_start[0] == bh_azis.size - 1:
-        orbit_start_idx = len(bh_azis) - 2
-    else:
-        orbit_start_idx = orbit_start[0]
-
-    orbit_end = find_idx(np.array(bh_azis), bh_azis[0] + (5 * np.pi / 2 if bh_azis[0] < bh_azis[1] else 5 * np.pi / -2))
-    if orbit_end[0] == bh_azis.size - 1:
-        orbit_end_idx = len(bh_azis) - 1
-    else:
-        orbit_end_idx = orbit_end[0]
-
+    max_separation = compute_max_bh_separation(bh_azis, magnitudes)
     # Find radius of the center hole in the mesh (based on uninterpolated max separation + BH size)
     # Hole radius = factor * (max_separation + scaled radius of larger BH)
-    omitted_radius_length = np.max(magnitudes[orbit_start_idx:orbit_end_idx]) + bh_scaling_factor * max(bh1_rel_mass, bh2_rel_mass) + 1
+    omitted_radius_length = max_separation + bh_scaling_factor * max(bh1_rel_mass, bh2_rel_mass) + 1
+    # Ensure that simulations where black holes are really far apart don't generate massive
+    # holes, so long as trajectories aren't being tracked
     if omitted_radius_length > 100 and not TRAJECTORY_LINES:
-        omitted_radius_length = 5 # Ensure that simulations where black holes are really far apart don't generate massive
-                                  # holes, so long as trajectories aren't being tracked
+        omitted_radius_length = 2 * bh_merged_radius + 2
         if STATUS_MESSAGES:
             print("WARNING: Black holes are spaced too far apart to generate proportional hole in mesh. Default hole will be used.")
 
@@ -1469,6 +1489,34 @@ Arguments:
     zoomout_idx = find_idx(equal_times, zoomout_time)[0]
 
     time6 = time.time() # End of cosmetic data calculations
+
+    if SPIN_VECTORS:
+        if STATUS_MESSAGES:
+            print( # Horizontal line of asterisks
+                f"{'*' * 70}\nInterpolating dimensionful spin data..."
+            )
+        bh1_spinx0, bh1_spiny0, bh1_spinz0 = bh_data[:, 6], bh_data[:, 7], bh_data[:, 8]
+        bh2_spinx0, bh2_spiny0, bh2_spinz0 = bh_data[:, 19], bh_data[:, 20], bh_data[:, 21]
+
+        spin1_interpolator = interp1d(bh_time, np.vstack((bh1_spinx0, bh1_spiny0, bh1_spinz0)), fill_value="extrapolate")
+        bh1_spinx, bh1_spiny, bh1_spinz = spin1_interpolator(equal_times)
+
+        spin2_interpolator = interp1d(bh_time, np.vstack((bh2_spinx0, bh2_spiny0, bh2_spinz0)), fill_value="extrapolate")
+        bh2_spinx, bh2_spiny, bh2_spinz = spin2_interpolator(equal_times)
+
+        bh1_mags = np.sqrt(bh1_spinx**2 + bh1_spiny**2 + bh1_spinz**2)
+        bh2_mags = np.sqrt(bh2_spinx**2 + bh2_spiny**2 + bh2_spinz**2)
+        max_spin = np.max([bh1_mags, bh2_mags])
+
+        spin_vector_max_length = omitted_radius_length / 2
+
+        if spin_vector_max_length <= bh_merged_radius:
+            spin_vector_max_length = bh_merged_radius * 1.5
+            if STATUS_MESSAGES:
+                print("WARNING: Spin vectors would be too small. Default spin vector length will be used.")
+        spin_scale_factor = spin_vector_max_length / max_spin
+
+        times = time.time()
 
     if STATUS_MESSAGES:
         print(f"{'*' * 70}\nConstructing mesh points in 3D...")
@@ -1493,9 +1541,6 @@ Arguments:
         print(f"{'*' * 70}\nInitializing animation...")
 
     # --- Precompute values for animation loop ---
-    bh1_scaled_radius = bh1_rel_mass * bh_scaling_factor
-    bh2_scaled_radius = bh2_rel_mass * bh_scaling_factor
-    bh_merged_radius = (bh1_scaled_radius + bh2_scaled_radius) / bh2_scaled_radius
 
     # Indices of the simulation time steps to actually render
     valid_indices = np.arange(0, n_times, save_rate)
@@ -1578,6 +1623,31 @@ Arguments:
         bh1_trajectory.actor.property.opacity = 0.5 # Make them semi-transparent so they don't cover up black holes
         bh2_trajectory.actor.property.opacity = 0.5
 
+    if SPIN_VECTORS:
+        bh1_spin = mlab.quiver3d(
+            bh1_x[0],
+            bh1_y[0],
+            bh1_z[0],
+            bh1_spinx[0],
+            bh1_spiny[0],
+            bh1_spinz[0],
+            mode="arrow",
+            scale_factor = spin_scale_factor,
+            color=(1, 0, 0)
+        )
+
+        bh2_spin = mlab.quiver3d(
+            bh2_x[0],
+            bh2_y[0],
+            bh2_z[0],
+            bh2_spinx[0],
+            bh2_spiny[0],
+            bh2_spinz[0],
+            mode="arrow",
+            scale_factor = spin_scale_factor,
+            color=(1, 0, 0)
+        )
+
     if PIP_VIEW: # For adding picture-in-picture view to MayaVi window
         render_window = fig.scene.render_window # Get the main render window from the scene
 
@@ -1618,7 +1688,9 @@ Arguments:
         print(f"  Camera Parameters: {time4 - (timeh if APPARENT_HORIZONS else time3):.3f}")
         print(f"  Grid Init: {time5 - time4:.3f}")
         print(f"  Cosmetic Calcs: {time6 - time5:.3f}")
-        print(f"  Mesh Construction: {time7 - time6:.3f}")
+        if SPIN_VECTORS:
+            print(f"Spin Vector Calculations: {times - time6:.3f}")
+        print(f"  Mesh Construction: {time7 - (times if SPIN_VECTORS else time6):.3f}")
         print(f"  Animation Setup: {start_time - time7:.3f}")
         print(f"  Total Setup Time: {start_time - time0:.3f}")
 
@@ -1677,6 +1749,29 @@ Arguments:
                     bh1_trajectory.mlab_source.reset(x=bh1_x[:time_idx], y=bh1_y[:time_idx], z=bh1_z[:time_idx])
                     bh2_trajectory.mlab_source.reset(x=bh2_x[:time_idx], y=bh2_y[:time_idx], z=bh2_z[:time_idx])
 
+                if SPIN_VECTORS:
+                    bh1_spin.mlab_source.reset(
+                        x=bh1_x[time_idx],
+                        y=bh1_y[time_idx],
+                        z=bh1_z[time_idx],
+                        u=bh1_spinx[time_idx],
+                        v=bh1_spiny[time_idx],
+                        w=bh1_spinz[time_idx]
+                    )
+
+                    if bh2_spin.visible:
+                        bh2_spin.mlab_source.reset(
+                            x=bh2_x[time_idx],
+                            y=bh2_y[time_idx],
+                            z=bh2_z[time_idx],
+                            u=bh2_spinx[time_idx],
+                            v=bh2_spiny[time_idx],
+                            w=bh2_spinz[time_idx]
+                        )
+
+                        if idx >= merge_rescale_idx:
+                            bh2_spin.visible = False # Remove the second spin vector after merging, so only the combined one remains
+
                 strain_slice = strain_to_mesh[..., time_idx].ravel()
                 # Update only the valid points (outside the hole)
                 np_points[valid_mask, 2] = strain_slice[valid_mask]
@@ -1717,7 +1812,17 @@ Arguments:
     # --- Generate audio file (if requested) ---
 
     if FREQ_SOUND:
-        audio_path, movie_with_audio = create_sound_file(strain_to_mesh, valid_indices, frames_per_second, movie_path_name)
+        valid_equal_times = equal_times[valid_indices]
+        audio_path, movie_with_audio = create_sound_file(
+            mode_data,
+            time_array,
+            ell_min,
+            ell_max,
+            valid_equal_times,
+            frames_per_second,
+            movie_path_name,
+            target_rate=48000
+        )
 
         # --- Merge Video and Audio ---
         if STATUS_MESSAGES:
@@ -1748,7 +1853,7 @@ Arguments:
             os.remove(movie_path_name)
 
         except Exception as e:
-             print(f"\nAn error occurred during merging: {e}")
+             print(f"\\nAn error occurred during merging: {e}")
              print("Please check your 'moviepy' and 'ffmpeg' installation.")
              print(f"Your silent video is at: {movie_path_name}")
              print(f"Your audio file is at: {audio_path}")
@@ -1805,8 +1910,8 @@ All {p4s_results.attempted} test(s) passed"""
         print(f"\nExecution failed: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-         # Catch unexpected errors
-         print(f"\nAn unexpected error occurred during main execution: {e}", file=sys.stderr)
-         # Optionally print traceback for debugging unexpected errors
-         traceback.print_exc()
-         sys.exit(1)
+        # Catch unexpected errors
+        print(f"\\nAn unexpected error occurred during main execution: {e}", file=sys.stderr)
+        # Optionally print traceback for debugging unexpected errors
+        traceback.print_exc()
+        sys.exit(1)
