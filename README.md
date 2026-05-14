@@ -41,6 +41,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install mayavi==4.8.3 --no-build-isolation
 ```
+Note: As of now, this program only works with versions around Python 3.11, as the specific version of VTK compatible with mayavi only exists for that version.
 
 To use these scripts with your own data, take a look at [this brief explanation](jupyter_notebooks/Tutorial-Compatible_Data_Formats.ipynb) of compatible data formats, along with instructions to prepare your data.
 
